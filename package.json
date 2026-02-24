@@ -1,0 +1,30 @@
+{
+  "name": "prayana-mobile",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "customer": "cd apps/customer && npx expo start",
+    "vendor": "cd apps/vendor && npx expo start",
+    "customer:ios": "cd apps/customer && npx expo run:ios",
+    "customer:android": "cd apps/customer && npx expo run:android",
+    "vendor:ios": "cd apps/vendor && npx expo run:ios",
+    "vendor:android": "cd apps/vendor && npx expo run:android",
+    "build:customer:dev": "cd apps/customer && eas build --profile development --platform all",
+    "build:customer:preview": "cd apps/customer && eas build --profile preview --platform all",
+    "build:customer:prod": "cd apps/customer && eas build --profile production --platform all",
+    "build:vendor:dev": "cd apps/vendor && eas build --profile development --platform all",
+    "build:vendor:preview": "cd apps/vendor && eas build --profile preview --platform all",
+    "build:vendor:prod": "cd apps/vendor && eas build --profile production --platform all",
+    "lint": "eslint apps packages --ext .ts,.tsx,.js,.jsx",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules"
+  },
+  "devDependencies": {
+    "typescript": "~5.3.3",
+    "prettier": "^3.2.5",
+    "eslint": "^8.57.0"
+  }
+}
