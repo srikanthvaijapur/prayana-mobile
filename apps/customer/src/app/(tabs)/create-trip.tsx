@@ -23,6 +23,7 @@ import {
 import { useCreateTripStore } from '@prayana/shared-stores';
 import { createTripAPI } from '@prayana/shared-services';
 import { useAuth } from '@prayana/shared-hooks';
+import TemplateSelector from '../../components/trip/TemplateSelector';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -208,6 +209,9 @@ export default function CreateTripScreen() {
             ))}
           </View>
         </View>
+
+        {/* ======= DESTINATION TEMPLATES ======= */}
+        <TemplateSelector />
 
         {/* ======= RECENT DRAFTS ======= */}
         {loadingDrafts ? (

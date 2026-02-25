@@ -5,8 +5,29 @@ import { useCreateTripStore } from "@prayana/shared-stores";
 import { useUIStore } from "@prayana/shared-stores";
 import { socketService } from "@prayana/shared-services";
 
-// activityTracker is not yet migrated - stub for now
-const activityTracker = { trackActivity: () => {}, getActivitySummary: () => ({}) };
+// activityTracker is not yet migrated - stub with all required methods
+const activityTracker = {
+  trackActivity: () => {},
+  getActivitySummary: () => ({}),
+  clearActivities: () => {},
+  addActivity: () => {},
+  generateMessage: (type, data) => {
+    const name = data?.name || '';
+    switch (type) {
+      case 'destination-added': return `added ${name} as a destination`;
+      case 'name-changed': return `renamed the trip to "${name}"`;
+      case 'dates-changed': return 'updated trip dates';
+      case 'budget-updated': return `updated the budget${data?.budget ? ` to ${data.budget}` : ''}`;
+      case 'expense-added': return `added an expense${data?.category ? ` (${data.category})` : ''}`;
+      case 'activity-added': return `added ${name}${data?.day ? ` to ${data.day}` : ''}`;
+      case 'activity-moved': return 'reordered activities';
+      case 'note-updated': return 'updated notes';
+      case 'transport-updated': return 'updated transport';
+      default: return 'updated the trip';
+    }
+  },
+  trackUserPresence: () => {},
+};
 
 /**
  * Detect activity type from field name

@@ -9,6 +9,7 @@ class SocketService {
     this.connected = false;
     this.currentTripId = null;
     this.listeners = new Map(); // Map<eventName, Set<callback>>
+    this.pendingListeners = []; // Queued listeners added before socket init
   }
 
   /**
@@ -58,6 +59,15 @@ class SocketService {
     this.socket.on("error", (error) => {
       console.error("[Socket] Error:", error);
     });
+
+    // Flush any listeners that were queued before socket was created
+    if (this.pendingListeners.length > 0) {
+      console.log(`[Socket] Attaching ${this.pendingListeners.length} queued listeners`);
+      for (const { event, callback } of this.pendingListeners) {
+        this.on(event, callback);
+      }
+      this.pendingListeners = [];
+    }
 
     return this.socket;
   }
@@ -207,7 +217,9 @@ class SocketService {
    */
   on(event, callback) {
     if (!this.socket) {
-      console.error("Socket not initialized");
+      // Queue listener to be attached when socket connects
+      this.pendingListeners.push({ event, callback });
+      console.log(`[Socket] Queued listener for "${event}" (socket not yet initialized)`);
       return;
     }
 
@@ -270,6 +282,7 @@ class SocketService {
       this.socket = null;
       this.connected = false;
       this.currentTripId = null;
+      this.pendingListeners = [];
 
       console.log("[Socket] Disconnected");
     }

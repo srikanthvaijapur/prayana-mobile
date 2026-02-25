@@ -23,6 +23,8 @@ export { useFieldPresence } from './useFieldPresence';
 
 // Data enrichment
 export { useEnrichmentPolling } from './useEnrichmentPolling';
+export { useImageEnrichment } from './useImageEnrichment';
+export { useCoordinateEnrichment } from './useCoordinateEnrichment';
 
 // Search
 export { useTripPlannerSearch } from './useTripPlannerSearch';

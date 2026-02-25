@@ -150,7 +150,8 @@ export const API_CONFIG = {
   },
 
   TIMEOUTS: {
-    DEFAULT: 15000,
+    DEFAULT: 30000,             // 30s - generous for mobile networks (was 15s, caused AbortError loops)
+    SEARCH: 25000,              // 25s for search/autocomplete endpoints
     LONG_OPERATION: 75000,
     IMAGE_REQUESTS: 10000,
     ITINERARY_GENERATION: 60000, // 60s timeout for AI generation (must be >= 60s or aborts silently)
@@ -319,12 +320,15 @@ export const makeAPICall = async (endpoint, options = {}) => {
       throw error;
     }
 
-    // Retry logic for network errors (NOT for 429 rate limits -- let server handle those)
+    // Retry logic for network errors (NOT for 429 rate limits or timeouts)
+    // AbortError from our own timeout should NOT be retried -- same timeout will just abort again
+    const isOurTimeout = error.name === "AbortError" && !useExternalSignal;
     if (
       retries < API_CONFIG.RETRY.MAX_ATTEMPTS &&
       error.status !== 429 &&
-      (error.name === "AbortError" ||
-        error.message.includes("fetch") ||
+      !isOurTimeout &&
+      (error.message.includes("fetch") ||
+        error.message.includes("Network request failed") ||
         error.status >= 500)
     ) {
       const delay = API_CONFIG.RETRY.EXPONENTIAL_BACKOFF
@@ -335,6 +339,13 @@ export const makeAPICall = async (endpoint, options = {}) => {
 
       await new Promise((resolve) => setTimeout(resolve, delay));
       return makeAPICall(endpoint, { ...options, retries: retries + 1 });
+    }
+
+    // Better error message for timeouts
+    if (isOurTimeout) {
+      const timeout = requestOptions.timeout || API_CONFIG.TIMEOUTS.DEFAULT;
+      console.warn(`[API] Request to ${endpoint} timed out after ${timeout}ms`);
+      error.message = `Request timed out after ${timeout}ms`;
     }
 
     throw error;

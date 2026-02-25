@@ -18,7 +18,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, fontSize, fontWeight, spacing, borderRadius, shadow } from '@prayana/shared-ui';
 import { useCreateTripStore } from '@prayana/shared-stores';
 import { makeAPICall } from '@prayana/shared-services';
-import { useDebounce } from '@prayana/shared-hooks';
+import { useDebounce, useCollaboration } from '@prayana/shared-hooks';
+import type { BottomModalRef } from '../../components/common/BottomModal';
+import CollaboratorAvatars from '../../components/trip/CollaboratorAvatars';
+import InviteSheet from '../../components/trip/InviteSheet';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -29,6 +32,27 @@ interface SearchResult {
   description?: string;
   image?: string;
   location?: string;
+}
+
+interface AISuggestion {
+  name: string;
+  country?: string;
+  description?: string;
+  image?: string;
+  suggestedDays?: number;
+  reason?: string;
+}
+
+/** Normalize API autocomplete result to SearchResult shape */
+function normalizeSearchResult(item: any, fallbackQuery?: string): SearchResult {
+  return {
+    id: item._id || item.id || item.placeId || `${(item.name || item.text || '').toLowerCase()}-${Date.now()}`,
+    name: item.name || item.text || item.shortName || item.description || fallbackQuery || 'Unknown',
+    country: item.country || item.location || item.secondary_text || '',
+    description: item.description || item.shortDescription || '',
+    image: item.image || item.imageUrls?.[0] || item.images?.[0]?.url || '',
+    location: item.location || '',
+  };
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -46,6 +70,13 @@ export default function DestinationsScreen() {
   const removeDestination = useCreateTripStore((s) => s.removeDestination);
   const setDestinationDuration = useCreateTripStore((s) => s.setDestinationDuration);
   const setCurrentStep = useCreateTripStore((s) => s.setCurrentStep);
+  const tripId = useCreateTripStore((s) => s.tripId);
+  const tempTripId = useCreateTripStore((s) => s.tempTripId);
+
+  // Collaboration
+  const activeTripId = tripId || tempTripId;
+  useCollaboration(activeTripId);
+  const inviteSheetRef = useRef<BottomModalRef>(null);
 
   // Local UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -53,6 +84,8 @@ export default function DestinationsScreen() {
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [error, setError] = useState('');
+  const [aiSuggestions, setAiSuggestions] = useState<AISuggestion[]>([]);
+  const [isLoadingAI, setIsLoadingAI] = useState(false);
   const searchInputRef = useRef<TextInput>(null);
 
   // Debounced search query
@@ -85,52 +118,53 @@ export default function DestinationsScreen() {
       setIsSearching(true);
       try {
         const response = await makeAPICall(
-          `/destinations/global-autocomplete?q=${encodeURIComponent(debouncedQuery.trim())}&limit=8`
+          `/destinations/global-autocomplete?q=${encodeURIComponent(debouncedQuery.trim())}&limit=8`,
+          { timeout: 25000 }
         );
 
         if (cancelled) return;
 
-        if (response.success && Array.isArray(response.data)) {
-          setSearchResults(response.data);
+        if (response.success && Array.isArray(response.data) && response.data.length > 0) {
+          setSearchResults(response.data.map((item: any) => normalizeSearchResult(item, debouncedQuery)));
           setShowResults(true);
         } else {
-          setSearchResults([]);
+          // Try fallback search endpoint
+          await tryFallbackSearch(debouncedQuery.trim(), cancelled);
         }
       } catch (err) {
         if (cancelled) return;
         console.error('Destination search failed:', err);
-        // Try fallback search endpoint
-        try {
-          const fallback = await makeAPICall('/destinations/search', {
-            method: 'POST',
-            body: JSON.stringify({
-              location: debouncedQuery.trim(),
-              page: 1,
-              limit: 8,
-              stream: false,
-            }),
-          });
-
-          if (cancelled) return;
-
-          if (fallback.success && Array.isArray(fallback.data)) {
-            setSearchResults(
-              fallback.data.map((item: any) => ({
-                id: item.id,
-                name: item.name || item.location || debouncedQuery,
-                country: item.country || item.location || '',
-                description: item.description || '',
-                image: item.image || item.imageUrls?.[0] || '',
-              }))
-            );
-            setShowResults(true);
-          }
-        } catch {
-          // Silently fail - user can still type
-          setSearchResults([]);
-        }
+        await tryFallbackSearch(debouncedQuery.trim(), cancelled);
       } finally {
         if (!cancelled) setIsSearching(false);
+      }
+    };
+
+    const tryFallbackSearch = async (query: string, isCancelled: boolean) => {
+      try {
+        const fallback = await makeAPICall('/destinations/search', {
+          method: 'POST',
+          body: JSON.stringify({
+            location: query,
+            page: 1,
+            limit: 8,
+            stream: false,
+          }),
+          timeout: 25000,
+        });
+
+        if (isCancelled) return;
+
+        if (fallback.success && Array.isArray(fallback.data) && fallback.data.length > 0) {
+          setSearchResults(fallback.data.map((item: any) => normalizeSearchResult(item, query)));
+          setShowResults(true);
+        } else {
+          setSearchResults([]);
+          setShowResults(true); // Show "no results" or custom add option
+        }
+      } catch {
+        setSearchResults([]);
+        setShowResults(true);
       }
     };
 
@@ -141,6 +175,74 @@ export default function DestinationsScreen() {
   }, [debouncedQuery]);
 
   // ─── Handlers ───
+
+  // ─── AI Destination Suggestions ───
+
+  const fetchAISuggestions = useCallback(async () => {
+    if (destinations.length === 0) {
+      setAiSuggestions([]);
+      return;
+    }
+
+    setIsLoadingAI(true);
+    try {
+      const tripType = useCreateTripStore.getState().tripType;
+      const budget = useCreateTripStore.getState().budget;
+      const response = await makeAPICall('/trip-suggestions/destinations', {
+        method: 'POST',
+        body: JSON.stringify({
+          destinations: destinations.map((d) => ({ name: d.name, country: d.country, duration: d.duration })),
+          tripType: tripType || 'leisure',
+          budget: budget || 'medium',
+        }),
+        timeout: 30000,
+      });
+
+      if (response.success && Array.isArray(response.data)) {
+        // Filter out already-added destinations
+        const existingNames = new Set(destinations.map((d) => d.name.toLowerCase()));
+        const filtered = response.data
+          .filter((s: any) => !existingNames.has((s.name || '').toLowerCase()))
+          .slice(0, 5);
+        setAiSuggestions(filtered);
+      }
+    } catch {
+      // AI suggestions are optional — fail silently
+    } finally {
+      setIsLoadingAI(false);
+    }
+  }, [destinations]);
+
+  // Fetch AI suggestions when destinations change
+  useEffect(() => {
+    if (destinations.length > 0) {
+      const timer = setTimeout(fetchAISuggestions, 1000);
+      return () => clearTimeout(timer);
+    } else {
+      setAiSuggestions([]);
+    }
+  }, [destinations.length]);
+
+  const handleAddAISuggestion = useCallback(
+    (suggestion: AISuggestion) => {
+      const alreadyAdded = destinations.some(
+        (d) => d.name.toLowerCase() === suggestion.name.toLowerCase()
+      );
+      if (alreadyAdded) return;
+
+      addDestination({
+        name: suggestion.name,
+        country: suggestion.country || '',
+        description: suggestion.description || '',
+        image: suggestion.image || '',
+        duration: suggestion.suggestedDays || Math.max(1, remainingDays > 0 ? Math.min(remainingDays, 2) : 2),
+      });
+
+      // Remove from suggestions
+      setAiSuggestions((prev) => prev.filter((s) => s.name !== suggestion.name));
+    },
+    [destinations, addDestination, remainingDays]
+  );
 
   const handleSelectResult = useCallback(
     (result: SearchResult) => {
@@ -169,6 +271,33 @@ export default function DestinationsScreen() {
     },
     [destinations, addDestination, remainingDays]
   );
+
+  const handleAddCustom = useCallback(() => {
+    const customName = searchQuery.trim();
+    if (!customName) return;
+
+    const alreadyAdded = destinations.some(
+      (d) => d.name.toLowerCase() === customName.toLowerCase()
+    );
+    if (alreadyAdded) {
+      setError(`${customName} is already added`);
+      setTimeout(() => setError(''), 2000);
+      return;
+    }
+
+    addDestination({
+      name: customName,
+      country: '',
+      description: '',
+      image: '',
+      duration: Math.max(1, remainingDays > 0 ? Math.min(remainingDays, 2) : 1),
+    });
+
+    setSearchQuery('');
+    setSearchResults([]);
+    setShowResults(false);
+    Keyboard.dismiss();
+  }, [searchQuery, destinations, addDestination, remainingDays]);
 
   const handleRemoveDestination = useCallback(
     (index: number) => {
@@ -254,12 +383,63 @@ export default function DestinationsScreen() {
             <Text style={styles.stepIndicator}>Step 2 of 4</Text>
             <Text style={styles.headerTitle}>Destinations</Text>
           </View>
-          <View style={styles.headerSpacer} />
+          <View style={styles.headerRight}>
+            <CollaboratorAvatars onPress={() => inviteSheetRef.current?.expand()} />
+            <TouchableOpacity
+              style={styles.inviteBtn}
+              onPress={() => inviteSheetRef.current?.expand()}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons name="person-add-outline" size={16} color={colors.primary[500]} />
+            </TouchableOpacity>
+          </View>
         </View>
 
-        {/* ── Progress Bar ── */}
-        <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: '50%' }]} />
+        {/* ── Step Navigation ── */}
+        <View style={styles.stepNav}>
+          {[
+            { step: 1, label: 'Setup', route: '/trip/setup' },
+            { step: 2, label: 'Destinations', route: null },
+            { step: 3, label: 'Planner', route: '/trip/planner' },
+            { step: 4, label: 'Review', route: '/trip/review' },
+          ].map((item, idx) => {
+            const isCurrent = item.step === 2;
+            const isCompleted = item.step < 2;
+            return (
+              <React.Fragment key={item.step}>
+                {idx > 0 && (
+                  <View style={[styles.stepConnector, (isCompleted || isCurrent) && styles.stepConnectorActive]} />
+                )}
+                <TouchableOpacity
+                  style={[
+                    styles.stepDot,
+                    isCompleted && styles.stepDotCompleted,
+                    isCurrent && styles.stepDotCurrent,
+                  ]}
+                  onPress={() => {
+                    if (item.route && item.step !== 2) {
+                      setCurrentStep(item.step);
+                      if (item.step < 2) {
+                        router.back();
+                      } else {
+                        router.push(item.route as any);
+                      }
+                    }
+                  }}
+                  disabled={isCurrent}
+                  activeOpacity={0.7}
+                >
+                  {isCompleted ? (
+                    <Ionicons name="checkmark" size={10} color="#ffffff" />
+                  ) : (
+                    <Text style={[styles.stepDotText, isCurrent && styles.stepDotTextCurrent]}>
+                      {item.step}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </React.Fragment>
+            );
+          })}
         </View>
 
         {/* ── Search Bar ── */}
@@ -295,25 +475,46 @@ export default function DestinationsScreen() {
           </View>
 
           {/* ── Search Results Dropdown ── */}
-          {showResults && searchResults.length > 0 && (
+          {showResults && (searchResults.length > 0 || (debouncedQuery.length >= 2 && !isSearching)) && (
             <View style={styles.searchDropdown}>
-              <FlatList
-                data={searchResults}
-                renderItem={renderSearchResult}
-                keyExtractor={(item, idx) => item.id || `${item.name}-${idx}`}
-                keyboardShouldPersistTaps="handled"
-                style={styles.searchResultsList}
-                ItemSeparatorComponent={() => <View style={styles.searchDivider} />}
-              />
-            </View>
-          )}
+              {/* Add as custom destination (always shown when typing) */}
+              {debouncedQuery.trim().length >= 2 && (
+                <TouchableOpacity
+                  style={styles.customAddItem}
+                  onPress={handleAddCustom}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.customAddIcon}>
+                    <Ionicons name="add" size={18} color="#ffffff" />
+                  </View>
+                  <View style={styles.searchResultContent}>
+                    <Text style={styles.customAddText}>Add "{debouncedQuery.trim()}"</Text>
+                    <Text style={styles.customAddSubtext}>as custom destination</Text>
+                  </View>
+                  <Ionicons name="arrow-forward-circle" size={22} color={colors.primary[500]} />
+                </TouchableOpacity>
+              )}
 
-          {showResults && !isSearching && searchResults.length === 0 && debouncedQuery.length >= 2 && (
-            <View style={styles.searchDropdown}>
-              <View style={styles.noResultsContainer}>
-                <Ionicons name="globe-outline" size={24} color={colors.textTertiary} />
-                <Text style={styles.noResultsText}>No destinations found for "{debouncedQuery}"</Text>
-              </View>
+              {searchResults.length > 0 && (
+                <>
+                  <View style={styles.searchDivider} />
+                  <FlatList
+                    data={searchResults}
+                    renderItem={renderSearchResult}
+                    keyExtractor={(item, idx) => item.id || `${item.name}-${idx}`}
+                    keyboardShouldPersistTaps="handled"
+                    style={styles.searchResultsList}
+                    ItemSeparatorComponent={() => <View style={styles.searchDivider} />}
+                  />
+                </>
+              )}
+
+              {searchResults.length === 0 && debouncedQuery.length >= 2 && !isSearching && (
+                <View style={styles.noResultsContainer}>
+                  <Text style={styles.noResultsText}>No database results for "{debouncedQuery}"</Text>
+                  <Text style={[styles.noResultsText, { fontSize: fontSize.xs }]}>Tap above to add as custom destination</Text>
+                </View>
+              )}
             </View>
           )}
         </View>
@@ -445,6 +646,41 @@ export default function DestinationsScreen() {
             ))
           )}
 
+          {/* ── AI Destination Suggestions ── */}
+          {destinations.length > 0 && (aiSuggestions.length > 0 || isLoadingAI) && (
+            <View style={styles.aiSection}>
+              <View style={styles.aiSectionHeader}>
+                <Ionicons name="sparkles" size={16} color={colors.primary[500]} />
+                <Text style={styles.aiSectionTitle}>Suggested Destinations</Text>
+                {isLoadingAI && <ActivityIndicator size="small" color={colors.primary[500]} />}
+              </View>
+              {isLoadingAI && aiSuggestions.length === 0 && (
+                <Text style={styles.aiLoadingText}>Finding destinations that pair well...</Text>
+              )}
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.aiPills}>
+                {aiSuggestions.map((suggestion, idx) => (
+                  <TouchableOpacity
+                    key={`ai-${suggestion.name}-${idx}`}
+                    style={styles.aiPill}
+                    onPress={() => handleAddAISuggestion(suggestion)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="add-circle" size={16} color={colors.primary[500]} />
+                    <Text style={styles.aiPillName}>{suggestion.name}</Text>
+                    {suggestion.suggestedDays ? (
+                      <Text style={styles.aiPillDays}>{suggestion.suggestedDays}d</Text>
+                    ) : null}
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+              {aiSuggestions.some((s) => s.reason) && (
+                <Text style={styles.aiReasonText}>
+                  {aiSuggestions.find((s) => s.reason)?.reason}
+                </Text>
+              )}
+            </View>
+          )}
+
           {/* Bottom spacer */}
           <View style={{ height: 100 }} />
         </ScrollView>
@@ -469,6 +705,9 @@ export default function DestinationsScreen() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      {/* Invite Collaborators Sheet */}
+      <InviteSheet sheetRef={inviteSheetRef} />
     </SafeAreaView>
   );
 }
@@ -519,20 +758,65 @@ const styles = StyleSheet.create({
     color: colors.text,
     marginTop: 2,
   },
-  headerSpacer: {
-    width: 40,
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  inviteBtn: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.primary[50],
   },
 
-  // Progress Bar
-  progressBar: {
-    height: 3,
+  // Step Navigation
+  stepNav: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  stepDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: colors.gray[200],
   },
-  progressFill: {
-    height: '100%',
-    backgroundColor: colors.primary[500],
-    borderTopRightRadius: 2,
-    borderBottomRightRadius: 2,
+  stepDotCompleted: {
+    backgroundColor: '#f97316',
+  },
+  stepDotCurrent: {
+    backgroundColor: '#f97316',
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+  },
+  stepDotText: {
+    fontSize: 10,
+    fontWeight: fontWeight.bold,
+    color: colors.textTertiary,
+  },
+  stepDotTextCurrent: {
+    color: '#ffffff',
+  },
+  stepConnector: {
+    flex: 1,
+    height: 2,
+    backgroundColor: colors.gray[200],
+    marginHorizontal: spacing.xs,
+    maxWidth: 50,
+  },
+  stepConnectorActive: {
+    backgroundColor: '#f97316',
   },
 
   // Search
@@ -814,5 +1098,88 @@ const styles = StyleSheet.create({
     fontSize: fontSize.md,
     fontWeight: fontWeight.semibold,
     color: '#ffffff',
+  },
+
+  // Custom add item
+  customAddItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    gap: spacing.md,
+    backgroundColor: colors.primary[50],
+  },
+  customAddIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.primary[500],
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  customAddText: {
+    fontSize: fontSize.md,
+    fontWeight: fontWeight.semibold,
+    color: colors.primary[600],
+  },
+  customAddSubtext: {
+    fontSize: fontSize.xs,
+    color: colors.primary[400],
+    marginTop: 1,
+  },
+
+  // AI Suggestions
+  aiSection: {
+    marginBottom: spacing.lg,
+    paddingTop: spacing.md,
+  },
+  aiSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  aiSectionTitle: {
+    flex: 1,
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: colors.textSecondary,
+  },
+  aiLoadingText: {
+    fontSize: fontSize.xs,
+    color: colors.textTertiary,
+    fontStyle: 'italic',
+    marginBottom: spacing.sm,
+  },
+  aiPills: {
+    gap: spacing.sm,
+    paddingBottom: spacing.xs,
+  },
+  aiPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.primary[50],
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+  },
+  aiPillName: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.medium,
+    color: colors.primary[600],
+  },
+  aiPillDays: {
+    fontSize: fontSize.xs,
+    color: colors.primary[400],
+    fontWeight: fontWeight.medium,
+  },
+  aiReasonText: {
+    fontSize: fontSize.xs,
+    color: colors.textTertiary,
+    fontStyle: 'italic',
+    marginTop: spacing.sm,
   },
 });

@@ -7,16 +7,15 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Animated,
-  TextInput as RNTextInput,
   KeyboardAvoidingView,
   Platform,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { colors, fontSize, fontWeight, spacing, shadow, borderRadius } from '@prayana/shared-ui';
 import { makeAPICall } from '@prayana/shared-services';
+import { PlaceAutocomplete } from '../../components/trip/PlaceAutocomplete';
 
 // --- Transport modes ---
 const TRANSPORT_MODES = [
@@ -118,15 +117,18 @@ export default function PlanTripScreen() {
         // Small delay to show 100% completion
         setTimeout(() => {
           setIsGenerating(false);
-          // Navigate to the generated itinerary view
-          // For now, show success and go back
-          Alert.alert(
-            'Itinerary Generated!',
-            `Your ${days}-day ${destination} itinerary is ready.`,
-            [
-              { text: 'View Trip', onPress: () => router.back() },
-            ]
-          );
+          router.push({
+            pathname: '/trip/itinerary',
+            params: {
+              markdown: response.data.markdown || (typeof response.data === 'string' ? response.data : ''),
+              title: response.data.title || `${days}-Day ${destination} Trip`,
+              destination: destination.trim(),
+              duration: String(days),
+              transportMode,
+              startingPoint: startingPoint.trim() || '',
+              markdownItineraryId: response.data.markdownItineraryId || '',
+            },
+          });
         }, 800);
       } else {
         throw new Error(response?.message || 'Failed to generate itinerary');
@@ -228,7 +230,7 @@ export default function PlanTripScreen() {
           {/* Form */}
           <View style={styles.form}>
             {/* Step 1: Starting Point */}
-            <View style={styles.stepContainer}>
+            <View style={[styles.stepContainer, { zIndex: 4 }]}>
               <View style={styles.stepIndicator}>
                 <View style={[styles.stepDot, { backgroundColor: colors.gray[300] }]}>
                   <Text style={styles.stepDotText}>1</Text>
@@ -237,19 +239,16 @@ export default function PlanTripScreen() {
               </View>
               <View style={styles.stepContent}>
                 <Text style={styles.fieldLabel}>Starting Point (Optional)</Text>
-                <RNTextInput
-                  style={[styles.input, shadow.sm]}
-                  placeholder="e.g., Bangalore, Mumbai"
-                  placeholderTextColor={colors.textTertiary}
+                <PlaceAutocomplete
                   value={startingPoint}
-                  onChangeText={setStartingPoint}
-                  autoCapitalize="words"
+                  onChange={setStartingPoint}
+                  placeholder="e.g., Bangalore, Mumbai"
                 />
               </View>
             </View>
 
             {/* Step 2: Destination */}
-            <View style={styles.stepContainer}>
+            <View style={[styles.stepContainer, { zIndex: 3 }]}>
               <View style={styles.stepIndicator}>
                 <View style={[styles.stepDot, { backgroundColor: '#FF6B6B' }]}>
                   <Text style={styles.stepDotText}>2</Text>
@@ -260,22 +259,20 @@ export default function PlanTripScreen() {
                 <Text style={styles.fieldLabel}>
                   Destination <Text style={styles.requiredStar}>*</Text>
                 </Text>
-                <RNTextInput
-                  style={[styles.input, shadow.sm, destination.trim() ? styles.inputFilled : null]}
-                  placeholder="e.g., Goa, Manali, Paris"
-                  placeholderTextColor={colors.textTertiary}
+                <PlaceAutocomplete
                   value={destination}
-                  onChangeText={(text) => {
+                  onChange={(text) => {
                     setDestination(text);
                     if (error) setError('');
                   }}
-                  autoCapitalize="words"
+                  placeholder="e.g., Goa, Manali, Paris"
+                  required
                 />
               </View>
             </View>
 
             {/* Step 3: Duration */}
-            <View style={styles.stepContainer}>
+            <View style={[styles.stepContainer, { zIndex: 2 }]}>
               <View style={styles.stepIndicator}>
                 <View style={[styles.stepDot, { backgroundColor: '#06B6D4' }]}>
                   <Text style={styles.stepDotText}>3</Text>
@@ -315,7 +312,7 @@ export default function PlanTripScreen() {
             </View>
 
             {/* Step 4: Transport */}
-            <View style={styles.stepContainer}>
+            <View style={[styles.stepContainer, { zIndex: 1 }]}>
               <View style={styles.stepIndicator}>
                 <View style={[styles.stepDot, { backgroundColor: colors.success }]}>
                   <Text style={styles.stepDotText}>4</Text>

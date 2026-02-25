@@ -192,9 +192,42 @@ export default function TripSetupScreen() {
           <View style={styles.headerSpacer} />
         </View>
 
-        {/* ── Progress Bar ── */}
-        <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: '25%' }]} />
+        {/* ── Step Navigation ── */}
+        <View style={styles.stepNav}>
+          {[
+            { step: 1, label: 'Setup', route: null },
+            { step: 2, label: 'Destinations', route: '/trip/destinations' },
+            { step: 3, label: 'Planner', route: '/trip/planner' },
+            { step: 4, label: 'Review', route: '/trip/review' },
+          ].map((item, idx) => {
+            const isCurrent = item.step === 1;
+            const isCompleted = false; // Step 1 has nothing before it
+            return (
+              <React.Fragment key={item.step}>
+                {idx > 0 && (
+                  <View style={[styles.stepConnector, isCurrent && styles.stepConnectorActive]} />
+                )}
+                <TouchableOpacity
+                  style={[
+                    styles.stepDot,
+                    isCurrent && styles.stepDotCurrent,
+                  ]}
+                  onPress={() => {
+                    if (item.route && item.step !== 1) {
+                      setCurrentStep(item.step);
+                      router.push(item.route as any);
+                    }
+                  }}
+                  disabled={isCurrent}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.stepDotText, isCurrent && styles.stepDotTextCurrent]}>
+                    {item.step}
+                  </Text>
+                </TouchableOpacity>
+              </React.Fragment>
+            );
+          })}
         </View>
 
         <ScrollView
@@ -515,16 +548,48 @@ const styles = StyleSheet.create({
     width: 40,
   },
 
-  // Progress Bar
-  progressBar: {
-    height: 3,
+  // Step Navigation
+  stepNav: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  stepDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: colors.gray[200],
   },
-  progressFill: {
-    height: '100%',
-    backgroundColor: colors.primary[500],
-    borderTopRightRadius: 2,
-    borderBottomRightRadius: 2,
+  stepDotCurrent: {
+    backgroundColor: '#f97316',
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+  },
+  stepDotText: {
+    fontSize: 10,
+    fontWeight: fontWeight.bold,
+    color: colors.textTertiary,
+  },
+  stepDotTextCurrent: {
+    color: '#ffffff',
+  },
+  stepConnector: {
+    flex: 1,
+    height: 2,
+    backgroundColor: colors.gray[200],
+    marginHorizontal: spacing.xs,
+    maxWidth: 50,
+  },
+  stepConnectorActive: {
+    backgroundColor: '#f97316',
   },
 
   // Scroll Content

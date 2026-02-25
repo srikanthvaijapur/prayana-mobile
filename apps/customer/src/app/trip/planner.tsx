@@ -5,7 +5,6 @@ import {
   TextInput,
   TouchableOpacity,
   ScrollView,
-  FlatList,
   StyleSheet,
   Platform,
   Modal,
@@ -19,6 +18,19 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, fontSize, fontWeight, spacing, borderRadius, shadow } from '@prayana/shared-ui';
 import { useCreateTripStore } from '@prayana/shared-stores';
 import { makeAPICall } from '@prayana/shared-services';
+import { useImageEnrichment, useCoordinateEnrichment, useCollaboration } from '@prayana/shared-hooks';
+import type { BottomModalRef } from '../../components/common/BottomModal';
+import ActivityImage from '../../components/trip/ActivityImage';
+import DraggableActivityList from '../../components/trip/DraggableActivityList';
+import SmartItineraryBuilder from '../../components/trip/SmartItineraryBuilder';
+import OptimizeRouteButton from '../../components/trip/OptimizeRouteButton';
+import { ItineraryMap } from '../../components/trip/ItineraryMap';
+import BudgetTrackerSheet from '../../components/trip/BudgetTrackerSheet';
+import WeatherBadge from '../../components/trip/WeatherBadge';
+import SOSButton from '../../components/trip/SOSButton';
+import CollaboratorAvatars from '../../components/trip/CollaboratorAvatars';
+import InviteSheet from '../../components/trip/InviteSheet';
+import TripChatSheet from '../../components/trip/TripChatSheet';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -62,13 +74,12 @@ interface AISuggestion {
   duration: number;
   rating: number;
   category: string;
+  image?: string;
+  images?: any[];
+  imageUrls?: string[];
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function getActivitiesForSlot(activities: Activity[], slot: TimeSlotKey): Activity[] {
-  return activities.filter((a) => a.timeSlot === slot);
-}
 
 function renderStars(rating: number): string {
   const full = Math.floor(rating);
@@ -87,17 +98,26 @@ export default function DayPlannerScreen() {
   const selectedDayIndex = useCreateTripStore((s) => s.selectedDayIndex);
   const tripType = useCreateTripStore((s) => s.tripType);
   const budget = useCreateTripStore((s) => s.budget);
+  const tripId = useCreateTripStore((s) => s.tripId);
+  const tempTripId = useCreateTripStore((s) => s.tempTripId);
 
   // Store actions
   const addActivity = useCreateTripStore((s) => s.addActivity);
   const removeActivity = useCreateTripStore((s) => s.removeActivity);
+  const updateActivityNotes = useCreateTripStore((s) => s.updateActivityNotes);
+  const updateDayNotes = useCreateTripStore((s) => s.updateDayNotes);
+  const reorderActivities = useCreateTripStore((s) => s.reorderActivities);
   const setSelectedDayIndex = useCreateTripStore((s) => s.setSelectedDayIndex);
   const setCurrentStep = useCreateTripStore((s) => s.setCurrentStep);
   const getDestinationForDay = useCreateTripStore((s) => s.getDestinationForDay);
 
+  // Collaboration
+  const activeTripId = tripId || tempTripId;
+  useCollaboration(activeTripId);
+
   // Local UI state
-  const [collapsedSlots, setCollapsedSlots] = useState<Record<string, boolean>>({});
-  const [showSearchModal, setShowSearchModal] = useState(false);
+  const [showAddPanel, setShowAddPanel] = useState(false);
+  const [expandedCards, setExpandedCards] = useState<Record<number, boolean>>({});
   const [activeSlot, setActiveSlot] = useState<TimeSlotKey>('morning');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<AISuggestion[]>([]);
@@ -105,8 +125,18 @@ export default function DayPlannerScreen() {
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   const [aiSuggestions, setAiSuggestions] = useState<AISuggestion[]>([]);
   const [showAISuggestions, setShowAISuggestions] = useState(false);
+  const [showMapModal, setShowMapModal] = useState(false);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [dayNotesText, setDayNotesText] = useState('');
+  const [editingActivity, setEditingActivity] = useState<{ index: number; activity: Activity } | null>(null);
+  const [editNotes, setEditNotes] = useState('');
+  const [scrollEnabled, setScrollEnabled] = useState(true);
 
   const dayTabsRef = useRef<ScrollView>(null);
+  const smartBuilderRef = useRef<BottomModalRef>(null);
+  const budgetSheetRef = useRef<BottomModalRef>(null);
+  const inviteSheetRef = useRef<BottomModalRef>(null);
+  const chatSheetRef = useRef<BottomModalRef>(null);
 
   // ─── Derived Values ───
 
@@ -114,26 +144,86 @@ export default function DayPlannerScreen() {
   const currentDestination = currentDay ? getDestinationForDay(selectedDayIndex) : null;
   const currentActivities: Activity[] = currentDay?.activities || [];
 
+  // Auto-enrich activity images for current day
+  useImageEnrichment(selectedDayIndex, currentActivities, currentDestination?.name);
+
+  // Auto-enrich missing coordinates for route optimization
+  useCoordinateEnrichment(selectedDayIndex, currentActivities, currentDestination?.name);
+
   const dayDate = useMemo(() => {
     if (!currentDay?.date) return '';
     const d = new Date(currentDay.date);
     return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   }, [currentDay?.date]);
 
-  // ─── Slot Toggle ───
+  // ─── Toggle Card Expand ───
 
-  const toggleSlot = useCallback((slot: TimeSlotKey) => {
-    setCollapsedSlots((prev) => ({ ...prev, [slot]: !prev[slot] }));
+  const toggleCardExpand = useCallback((idx: number) => {
+    setExpandedCards((prev) => ({ ...prev, [idx]: !prev[idx] }));
   }, []);
 
-  // ─── Open Search Modal ───
+  // ─── Open Add Activity Panel (inline) ───
 
-  const handleOpenSearch = useCallback((slot: TimeSlotKey) => {
-    setActiveSlot(slot);
+  const handleOpenAddPanel = useCallback((slot?: TimeSlotKey) => {
+    if (slot) setActiveSlot(slot);
     setSearchQuery('');
     setSearchResults([]);
-    setShowSearchModal(true);
-  }, []);
+    setShowAddPanel(true);
+
+    // Auto-load popular places from database for this destination
+    if (currentDestination?.name) {
+      (async () => {
+        try {
+          setIsSearching(true);
+          const dbResponse = await makeAPICall('/destinations/hierarchical-search', {
+            method: 'POST',
+            body: JSON.stringify({
+              query: currentDestination.name,
+              filters: { limit: 10 },
+            }),
+            timeout: 25000,
+          });
+
+          let places: any[] = [];
+          if (dbResponse.success && Array.isArray(dbResponse.data)) {
+            places = dbResponse.data;
+          } else if (dbResponse.data?.results) {
+            places = dbResponse.data.results;
+          } else if (Array.isArray(dbResponse.places)) {
+            places = dbResponse.places;
+          } else if (dbResponse.hero) {
+            if (dbResponse.hero) places.push(dbResponse.hero);
+            if (Array.isArray(dbResponse.places)) places.push(...dbResponse.places);
+            for (const key of Object.keys(dbResponse)) {
+              if (Array.isArray(dbResponse[key]) && key !== 'places' && dbResponse[key][0]?.name) {
+                places.push(...dbResponse[key]);
+              }
+            }
+          }
+
+          if (places.length > 0) {
+            setSearchResults(
+              places.slice(0, 10).map((item: any) => ({
+                name: item.name || item.title || 'Activity',
+                description: item.description || item.shortDescription || '',
+                timeSlot: (slot || 'morning') as TimeSlotKey,
+                duration: item.duration ? parseFloat(item.duration) : 2,
+                rating: item.rating || 4.0,
+                category: item.category || 'general',
+                image: item.image || item.imageUrls?.[0] || item.images?.[0]?.url || '',
+                images: item.images || [],
+                imageUrls: item.imageUrls || [],
+              }))
+            );
+          }
+        } catch {
+          // Non-critical — user can manually search
+        } finally {
+          setIsSearching(false);
+        }
+      })();
+    }
+  }, [currentDestination]);
 
   // ─── Search Activities ───
 
@@ -142,33 +232,102 @@ export default function DayPlannerScreen() {
 
     setIsSearching(true);
     try {
-      const response = await makeAPICall('/trip-suggestions/activities', {
-        method: 'POST',
-        body: JSON.stringify({
-          destination: currentDestination.name,
-          dayNumber: selectedDayIndex + 1,
-          timeSlot: activeSlot,
-          tripType,
-          existingActivities: currentActivities.map((a) => a.name),
-          searchQuery: searchQuery.trim(),
-        }),
-        timeout: 60000,
-      });
+      // Try hierarchical search first (richer DB results with images)
+      // Match web format: { query: destinationName, filters: { limit, searchTerm } }
+      let results: AISuggestion[] = [];
+      try {
+        const dbResponse = await makeAPICall('/destinations/hierarchical-search', {
+          method: 'POST',
+          body: JSON.stringify({
+            query: currentDestination.name,
+            filters: {
+              limit: 10,
+              searchTerm: searchQuery.trim(),
+            },
+          }),
+          timeout: 25000,
+        });
 
-      if (response.success && Array.isArray(response.data)) {
-        setSearchResults(
-          response.data.map((item: any) => ({
+        // Response can be { success, data: [...] } or raw hierarchical object
+        let places: any[] = [];
+        if (dbResponse.success && Array.isArray(dbResponse.data)) {
+          places = dbResponse.data;
+        } else if (dbResponse.data?.results) {
+          // Some responses nest under data.results
+          places = dbResponse.data.results;
+        } else if (Array.isArray(dbResponse.places)) {
+          places = dbResponse.places;
+        } else if (dbResponse.hero) {
+          // Full hierarchical response - extract all places
+          const allPlaces = [];
+          if (dbResponse.hero) allPlaces.push(dbResponse.hero);
+          if (Array.isArray(dbResponse.places)) allPlaces.push(...dbResponse.places);
+          // Also check category arrays
+          for (const key of Object.keys(dbResponse)) {
+            if (Array.isArray(dbResponse[key]) && key !== 'places' && dbResponse[key][0]?.name) {
+              allPlaces.push(...dbResponse[key]);
+            }
+          }
+          places = allPlaces;
+        }
+
+        // Filter by search term if backend didn't filter
+        if (places.length > 0 && searchQuery.trim()) {
+          const term = searchQuery.trim().toLowerCase();
+          const filtered = places.filter((p: any) =>
+            (p.name || '').toLowerCase().includes(term) ||
+            (p.description || '').toLowerCase().includes(term) ||
+            (p.category || '').toLowerCase().includes(term)
+          );
+          if (filtered.length > 0) places = filtered;
+        }
+
+        if (places.length > 0) {
+          results = places.slice(0, 10).map((item: any) => ({
+            name: item.name || item.title || 'Activity',
+            description: item.description || item.shortDescription || '',
+            timeSlot: activeSlot,
+            duration: item.duration ? parseFloat(item.duration) : 2,
+            rating: item.rating || 4.0,
+            category: item.category || 'general',
+            image: item.image || item.imageUrls?.[0] || item.images?.[0]?.url || '',
+            images: item.images || [],
+            imageUrls: item.imageUrls || [],
+          }));
+        }
+      } catch {
+        // Hierarchical search not available, will fall back below
+      }
+
+      // Fallback: AI-based activity suggestions
+      if (results.length === 0) {
+        const response = await makeAPICall('/trip-suggestions/activities', {
+          method: 'POST',
+          body: JSON.stringify({
+            destination: currentDestination.name,
+            dayNumber: selectedDayIndex + 1,
+            timeSlot: activeSlot,
+            tripType,
+            existingActivities: currentActivities.map((a) => a.name),
+            searchQuery: searchQuery.trim(),
+          }),
+          timeout: 60000,
+        });
+
+        if (response.success && Array.isArray(response.data)) {
+          results = response.data.map((item: any) => ({
             name: item.name || item.title || 'Activity',
             description: item.description || '',
             timeSlot: activeSlot,
             duration: item.duration || 2,
             rating: item.rating || 4.0,
             category: item.category || 'general',
-          }))
-        );
-      } else {
-        setSearchResults([]);
+            image: item.image || '',
+          }));
+        }
       }
+
+      setSearchResults(results);
     } catch (err) {
       console.error('Activity search failed:', err);
       Alert.alert('Search Failed', 'Could not search for activities. Please try again.');
@@ -189,7 +348,9 @@ export default function DayPlannerScreen() {
         rating: suggestion.rating || 4.0,
         category: suggestion.category || 'general',
         coordinates: { lat: 0, lng: 0 },
-        image: '',
+        image: suggestion.image || '',
+        images: suggestion.images || [],
+        imageUrls: suggestion.imageUrls || [],
         notes: '',
       });
     },
@@ -216,7 +377,66 @@ export default function DayPlannerScreen() {
     [selectedDayIndex, removeActivity]
   );
 
-  // ─── AI Generate Suggestions ───
+  // ─── Edit Activity ───
+
+  const handleEditActivity = useCallback(
+    (activityIndex: number, activity: Activity) => {
+      setEditingActivity({ index: activityIndex, activity });
+      setEditNotes(activity.notes || '');
+    },
+    []
+  );
+
+  const handleSaveNotes = useCallback(() => {
+    if (editingActivity) {
+      updateActivityNotes(selectedDayIndex, editingActivity.index, editNotes);
+      setEditingActivity(null);
+    }
+  }, [editingActivity, editNotes, selectedDayIndex, updateActivityNotes]);
+
+  const handleChangeTimeSlot = useCallback(
+    (newSlot: TimeSlotKey) => {
+      if (!editingActivity) return;
+      const state = useCreateTripStore.getState();
+      const newDays = [...state.days];
+      const dayActivities = [...(newDays[selectedDayIndex]?.activities || [])];
+      if (dayActivities[editingActivity.index]) {
+        dayActivities[editingActivity.index] = {
+          ...dayActivities[editingActivity.index],
+          timeSlot: newSlot,
+        };
+        newDays[selectedDayIndex] = { ...newDays[selectedDayIndex], activities: dayActivities };
+        useCreateTripStore.setState({ days: newDays, hasUnsavedChanges: true });
+      }
+      setEditingActivity(null);
+    },
+    [editingActivity, selectedDayIndex]
+  );
+
+  // ─── Day Notes Sync ───
+
+  // Sync local day notes text when day changes
+  React.useEffect(() => {
+    setDayNotesText(currentDay?.notes || '');
+  }, [selectedDayIndex, currentDay?.notes]);
+
+  const handleSaveDayNotes = useCallback(() => {
+    updateDayNotes(selectedDayIndex, dayNotesText);
+  }, [selectedDayIndex, dayNotesText, updateDayNotes]);
+
+  // ─── Schedule Time Helpers ───
+
+  const getTimeForSlot = useCallback((slot: TimeSlotKey, index: number): string => {
+    const times: Record<TimeSlotKey, string[]> = {
+      morning: ['6:30 AM', '7:30 AM', '8:30 AM', '9:30 AM', '10:30 AM', '11:30 AM'],
+      afternoon: ['12:00 PM', '1:00 PM', '2:00 PM', '3:00 PM', '4:00 PM', '5:00 PM'],
+      evening: ['5:30 PM', '6:30 PM', '7:30 PM', '8:30 PM'],
+      night: ['9:00 PM', '10:00 PM', '11:00 PM'],
+    };
+    return times[slot]?.[index] || '';
+  }, []);
+
+  // ─── AI Generate Suggestions (PWA-matching: parallel AI + DB with image enrichment) ───
 
   const handleGenerateAI = useCallback(async () => {
     if (!currentDestination) {
@@ -232,60 +452,193 @@ export default function DayPlannerScreen() {
       const existingNames = currentActivities.map((a) => a.name);
       const dayNum = selectedDayIndex + 1;
       const destName = currentDestination.name;
+      const existingNamesStr = existingNames.join(', ') || 'none';
 
-      const prompt = `Suggest 5-7 activities for Day ${dayNum} in ${destName}. Trip type: ${tripType}, Budget: ${budget}. Distribute activities across morning, afternoon, evening, and night time slots. Already planned: ${existingNames.join(', ') || 'none'}. For each activity, provide: name, description (1 sentence), timeSlot (morning/afternoon/evening/night), duration in hours, rating (1-5), category. Return as JSON array.`;
+      // PWA-matching comprehensive prompt with destination-specific details
+      const aiPrompt = `You are an expert travel guide for ${destName}.
 
-      const response = await makeAPICall('/ai/generate', {
-        method: 'POST',
-        body: JSON.stringify({
-          prompt,
-          temperature: 0.7,
-        }),
-        timeout: 60000,
-      });
+Suggest the BEST places to visit in ${destName} on Day ${dayNum} of a ${tripType || 'leisure'} trip. Budget: ${budget}.
 
-      if (response.success && response.data) {
-        let suggestions: AISuggestion[] = [];
+ALREADY PLANNED (skip these): ${existingNamesStr}
 
-        // Parse AI response - could be an array directly or a string needing JSON parse
-        if (Array.isArray(response.data)) {
-          suggestions = response.data;
-        } else if (typeof response.data === 'string') {
-          try {
-            // Try extracting JSON array from response text
-            const jsonMatch = response.data.match(/\[[\s\S]*\]/);
-            if (jsonMatch) {
-              suggestions = JSON.parse(jsonMatch[0]);
-            }
-          } catch {
-            console.warn('Failed to parse AI suggestions as JSON');
+Rules:
+- Only suggest REAL places that exist in ${destName}
+- Use EXACT local names (e.g., "Virupaksha Temple" not "a temple")
+- Suggest 3-5 places per time slot
+- Mix categories: landmarks, food, nature, culture
+
+Return ONLY valid JSON (no markdown, no explanation, no code blocks):
+{"morning":[{"name":"Place Name","description":"Why visit","category":"temple","duration":2,"rating":4.5}],"afternoon":[...],"evening":[...],"night":[...]}`;
+
+      // Parallel fetch: AI suggestions + DB search (like PWA)
+      let aiResponse: any = null;
+      let dbResult: any = null;
+
+      try {
+        [aiResponse, dbResult] = await Promise.all([
+          makeAPICall('/ai/generate', {
+            method: 'POST',
+            body: JSON.stringify({ prompt: aiPrompt, temperature: 0.7 }),
+            timeout: 60000,
+          }),
+          makeAPICall('/destinations/hierarchical-search', {
+            method: 'POST',
+            body: JSON.stringify({ query: destName, filters: { limit: 50 }, includeImages: true }),
+            timeout: 25000,
+          }).catch(() => null), // Non-critical - images only
+        ]);
+      } catch (fetchErr: any) {
+        console.error('[AI Suggestions] API call failed:', fetchErr?.message);
+        throw fetchErr;
+      }
+
+      console.log('[AI Suggestions] aiResponse:', JSON.stringify({
+        success: aiResponse?.success,
+        hasData: !!aiResponse?.data,
+        dataType: typeof aiResponse?.data,
+        hasText: !!aiResponse?.data?.text,
+        textLength: aiResponse?.data?.text?.length,
+      }));
+
+      // Parse AI response
+      const validSlots = ['morning', 'afternoon', 'evening', 'night'] as const;
+      let aiPlaces: Record<string, any[]> = { morning: [], afternoon: [], evening: [], night: [] };
+
+      if (aiResponse?.success && aiResponse?.data) {
+        const data = aiResponse.data;
+        let text = '';
+
+        // Extract text from response
+        if (typeof data === 'string') {
+          text = data;
+        } else if (data?.text && typeof data.text === 'string') {
+          text = data.text;
+        } else if (typeof data === 'object' && !Array.isArray(data)) {
+          // Direct object with slot arrays (e.g., { morning: [...], afternoon: [...] })
+          for (const slot of validSlots) {
+            if (Array.isArray(data[slot])) aiPlaces[slot] = data[slot];
           }
-        } else if (response.data.suggestions && Array.isArray(response.data.suggestions)) {
-          suggestions = response.data.suggestions;
-        } else if (response.data.activities && Array.isArray(response.data.activities)) {
-          suggestions = response.data.activities;
         }
 
-        setAiSuggestions(
-          suggestions.map((s: any) => ({
-            name: s.name || s.title || 'Suggested Activity',
-            description: s.description || '',
-            timeSlot: (['morning', 'afternoon', 'evening', 'night'].includes(s.timeSlot)
-              ? s.timeSlot
-              : 'morning') as TimeSlotKey,
-            duration: Number(s.duration) || 2,
-            rating: Number(s.rating) || 4.0,
-            category: s.category || 'general',
-          }))
-        );
+        if (text) {
+          console.log('[AI Suggestions] Raw AI text (first 200 chars):', text.substring(0, 200));
+
+          // Strip markdown code blocks if present
+          let cleanText = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+          // Try extracting JSON object from text
+          const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            try {
+              const parsed = JSON.parse(jsonMatch[0]);
+              let foundSlots = 0;
+              for (const slot of validSlots) {
+                if (Array.isArray(parsed[slot])) {
+                  aiPlaces[slot] = parsed[slot].map((item: any) =>
+                    typeof item === 'string' ? { name: item } : item
+                  );
+                  foundSlots++;
+                }
+              }
+              console.log(`[AI Suggestions] Parsed ${foundSlots} time slots from JSON object`);
+            } catch (parseErr: any) {
+              console.warn('[AI Suggestions] JSON object parse failed:', parseErr?.message);
+              // Fallback: try as array
+              const arrMatch = cleanText.match(/\[[\s\S]*?\]/);
+              if (arrMatch) {
+                try {
+                  const arr = JSON.parse(arrMatch[0]);
+                  if (Array.isArray(arr)) {
+                    arr.forEach((item: any) => {
+                      const slot = validSlots.includes(item.timeSlot) ? item.timeSlot : 'morning';
+                      aiPlaces[slot].push(item);
+                    });
+                    console.log(`[AI Suggestions] Parsed ${arr.length} items from array fallback`);
+                  }
+                } catch {
+                  console.warn('[AI Suggestions] Array fallback also failed');
+                }
+              }
+            }
+          } else {
+            console.warn('[AI Suggestions] No JSON object found in AI response');
+          }
+        }
+      } else {
+        console.warn('[AI Suggestions] API returned success=false or no data:', JSON.stringify(aiResponse));
       }
+
+      const totalAiPlaces = validSlots.reduce((sum, s) => sum + aiPlaces[s].length, 0);
+      console.log(`[AI Suggestions] Total parsed places: ${totalAiPlaces}`, {
+        morning: aiPlaces.morning.length,
+        afternoon: aiPlaces.afternoon.length,
+        evening: aiPlaces.evening.length,
+        night: aiPlaces.night.length,
+      });
+
+      // Extract DB places for image enrichment
+      let dbPlaces: any[] = [];
+      if (dbResult?.success) {
+        if (Array.isArray(dbResult.data)) dbPlaces = dbResult.data;
+        else if (dbResult.data?.results) dbPlaces = dbResult.data.results;
+        else if (dbResult.data?.hero || dbResult.data?.places) {
+          if (dbResult.data.hero) dbPlaces.push(dbResult.data.hero);
+          if (Array.isArray(dbResult.data.places)) dbPlaces.push(...dbResult.data.places);
+          for (const key of Object.keys(dbResult.data)) {
+            if (Array.isArray(dbResult.data[key]) && key !== 'places' && dbResult.data[key][0]?.name) {
+              dbPlaces.push(...dbResult.data[key]);
+            }
+          }
+        }
+      }
+
+      const existingNamesSet = new Set(existingNames.map(n => n.toLowerCase()));
+
+      // Enrich each slot's suggestions with DB images
+      const enrichSlot = (items: any[], slotKey: string): AISuggestion[] => {
+        return items
+          .filter((item: any) => item.name && !existingNamesSet.has(item.name.toLowerCase()))
+          .map((item: any) => {
+            // Try to find matching DB entry for images
+            const dbMatch = dbPlaces.find((p: any) =>
+              p.name?.toLowerCase() === item.name?.toLowerCase() ||
+              p.name?.toLowerCase().includes(item.name?.toLowerCase()) ||
+              item.name?.toLowerCase().includes(p.name?.toLowerCase())
+            );
+
+            const imageUrl = dbMatch?.image || dbMatch?.imageUrls?.[0] ||
+              (dbMatch?.images?.[0]?.url || (typeof dbMatch?.images?.[0] === 'string' ? dbMatch?.images?.[0] : ''));
+
+            return {
+              name: item.name || 'Activity',
+              description: item.description || item.why || dbMatch?.shortDescription || '',
+              timeSlot: slotKey as TimeSlotKey,
+              duration: Number(item.duration) || 2,
+              rating: Number(item.rating) || dbMatch?.rating || 4.0,
+              category: item.category || dbMatch?.category || 'general',
+              image: imageUrl || '',
+              images: dbMatch?.images || [],
+              imageUrls: dbMatch?.imageUrls || (imageUrl ? [imageUrl] : []),
+            };
+          });
+      };
+
+      const allSuggestions: AISuggestion[] = [
+        ...enrichSlot(aiPlaces.morning, 'morning'),
+        ...enrichSlot(aiPlaces.afternoon, 'afternoon'),
+        ...enrichSlot(aiPlaces.evening, 'evening'),
+        ...enrichSlot(aiPlaces.night, 'night'),
+      ];
+
+      console.log(`[AI Suggestions] Final suggestions count: ${allSuggestions.length}`);
+      setAiSuggestions(allSuggestions);
     } catch (err: any) {
-      console.error('AI generation failed:', err);
+      console.error('[AI Suggestions] Failed:', err?.message || err);
       Alert.alert(
         'AI Generation Failed',
-        err?.message?.includes('timeout')
+        err?.message?.includes('timeout') || err?.message?.includes('timed out')
           ? 'The request timed out. Please try again.'
-          : 'Could not generate suggestions. Please try again.'
+          : `Could not generate suggestions. ${err?.message || 'Please try again.'}`
       );
       setShowAISuggestions(false);
     } finally {
@@ -326,7 +679,7 @@ export default function DayPlannerScreen() {
       contentContainerStyle={styles.dayTabsContent}
       style={styles.dayTabsContainer}
     >
-      {days.map((day, index) => {
+      {days.map((day: any, index: number) => {
         const isSelected = index === selectedDayIndex;
         const actCount = day.activities?.length || 0;
         const dest = getDestinationForDay(index);
@@ -361,107 +714,29 @@ export default function DayPlannerScreen() {
     </ScrollView>
   );
 
-  // ─── Render: Time Slot Section ───
-
-  const renderTimeSlot = (slot: TimeSlotConfig) => {
-    const activities = getActivitiesForSlot(currentActivities, slot.key);
-    const isCollapsed = collapsedSlots[slot.key];
-
-    return (
-      <View key={slot.key} style={styles.timeSlotSection}>
-        {/* Section Header */}
-        <TouchableOpacity
-          style={[styles.timeSlotHeader, { backgroundColor: slot.bgColor }]}
-          onPress={() => toggleSlot(slot.key)}
-          activeOpacity={0.7}
-        >
-          <View style={styles.timeSlotHeaderLeft}>
-            <Text style={styles.timeSlotEmoji}>{slot.emoji}</Text>
-            <Text style={[styles.timeSlotLabel, { color: slot.color }]}>{slot.label}</Text>
-            <View style={[styles.timeSlotCount, { backgroundColor: slot.color }]}>
-              <Text style={styles.timeSlotCountText}>{activities.length}</Text>
-            </View>
-          </View>
-          <Ionicons
-            name={isCollapsed ? 'chevron-down' : 'chevron-up'}
-            size={18}
-            color={slot.color}
-          />
-        </TouchableOpacity>
-
-        {/* Activities */}
-        {!isCollapsed && (
-          <View style={styles.timeSlotBody}>
-            {activities.length === 0 ? (
-              <View style={styles.emptySlot}>
-                <Text style={styles.emptySlotText}>No activities planned</Text>
-              </View>
-            ) : (
-              activities.map((activity, actIdx) => {
-                // Find the real index in the full activities array
-                const realIndex = currentActivities.findIndex(
-                  (a) => a.activityId === activity.activityId
-                );
-                return (
-                  <View key={activity.activityId || actIdx} style={styles.activityCard}>
-                    {/* Image placeholder */}
-                    <View style={[styles.activityImage, { backgroundColor: slot.bgColor }]}>
-                      <Ionicons name="image-outline" size={24} color={slot.color} />
-                    </View>
-                    <View style={styles.activityContent}>
-                      <Text style={styles.activityName} numberOfLines={1}>
-                        {activity.name}
-                      </Text>
-                      {activity.description ? (
-                        <Text style={styles.activityDescription} numberOfLines={2}>
-                          {activity.description}
-                        </Text>
-                      ) : null}
-                      <View style={styles.activityMeta}>
-                        {activity.duration ? (
-                          <View style={styles.activityMetaItem}>
-                            <Ionicons name="time-outline" size={12} color={colors.textTertiary} />
-                            <Text style={styles.activityMetaText}>{activity.duration}h</Text>
-                          </View>
-                        ) : null}
-                        {activity.rating ? (
-                          <View style={styles.activityMetaItem}>
-                            <Ionicons name="star" size={12} color="#f59e0b" />
-                            <Text style={styles.activityMetaText}>
-                              {activity.rating.toFixed(1)}
-                            </Text>
-                          </View>
-                        ) : null}
-                      </View>
-                    </View>
-                    <TouchableOpacity
-                      onPress={() => handleRemoveActivity(realIndex >= 0 ? realIndex : actIdx)}
-                      style={styles.activityDeleteBtn}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    >
-                      <Ionicons name="trash-outline" size={16} color={colors.error} />
-                    </TouchableOpacity>
-                  </View>
-                );
-              })
-            )}
-
-            {/* Add Activity Button */}
-            <TouchableOpacity
-              style={styles.addActivityBtn}
-              onPress={() => handleOpenSearch(slot.key)}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="add-circle-outline" size={18} color={colors.primary[500]} />
-              <Text style={styles.addActivityText}>Add Activity</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-      </View>
-    );
-  };
-
   // ─── Render: AI Suggestions Panel ───
+
+  // Group AI suggestions by time slot
+  const aiSuggestionsBySlot = useMemo(() => {
+    const grouped: Record<TimeSlotKey, AISuggestion[]> = { morning: [], afternoon: [], evening: [], night: [] };
+    aiSuggestions.forEach((s) => {
+      const slot = (['morning', 'afternoon', 'evening', 'night'].includes(s.timeSlot) ? s.timeSlot : 'morning') as TimeSlotKey;
+      grouped[slot].push(s);
+    });
+    return grouped;
+  }, [aiSuggestions]);
+
+  // Track which AI suggestion slots are expanded (show all vs first 3)
+  const [aiExpandedSlots, setAiExpandedSlots] = useState<Record<TimeSlotKey, boolean>>({
+    morning: false, afternoon: false, evening: false, night: false,
+  });
+
+  const AI_SLOT_CONFIG: Record<TimeSlotKey, { timeRange: string }> = {
+    morning: { timeRange: '6 AM – 12 PM' },
+    afternoon: { timeRange: '12 PM – 6 PM' },
+    evening: { timeRange: '6 PM – 10 PM' },
+    night: { timeRange: '10 PM – 12 AM' },
+  };
 
   const renderAISuggestions = () => {
     if (!showAISuggestions) return null;
@@ -469,24 +744,36 @@ export default function DayPlannerScreen() {
     return (
       <View style={styles.aiPanel}>
         <View style={styles.aiPanelHeader}>
-          <Text style={styles.aiPanelTitle}>AI Suggestions</Text>
-          <TouchableOpacity
-            onPress={() => {
-              setShowAISuggestions(false);
-              setAiSuggestions([]);
-            }}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Ionicons name="close" size={20} color={colors.textSecondary} />
-          </TouchableOpacity>
+          <View style={styles.aiPanelHeaderLeft}>
+            <Ionicons name="sparkles" size={16} color="#06b6d4" />
+            <Text style={styles.aiPanelTitle}>AI Suggestions</Text>
+          </View>
+          <View style={styles.aiPanelHeaderRight}>
+            <TouchableOpacity
+              onPress={handleGenerateAI}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={styles.aiRefreshBtn}
+            >
+              <Ionicons name="refresh" size={16} color="#06b6d4" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                setShowAISuggestions(false);
+                setAiSuggestions([]);
+              }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons name="close" size={20} color={colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {isGeneratingAI ? (
           <View style={styles.aiLoading}>
-            <ActivityIndicator size="large" color={colors.primary[500]} />
+            <ActivityIndicator size="large" color="#06b6d4" />
             <Text style={styles.aiLoadingText}>Generating smart suggestions...</Text>
             <Text style={styles.aiLoadingSubtext}>
-              Crafting the perfect itinerary for {currentDestination?.name}
+              Analyzing {currentDestination?.name} attractions, ratings & routes
             </Text>
           </View>
         ) : aiSuggestions.length === 0 ? (
@@ -496,173 +783,107 @@ export default function DayPlannerScreen() {
           </View>
         ) : (
           <ScrollView style={styles.aiSuggestionsList} nestedScrollEnabled>
-            {aiSuggestions.map((suggestion, idx) => {
-              const slotConfig = TIME_SLOTS.find((s) => s.key === suggestion.timeSlot);
+            {TIME_SLOTS.map((slot) => {
+              const items = aiSuggestionsBySlot[slot.key];
+              if (items.length === 0) return null;
+              const isSlotExpanded = aiExpandedSlots[slot.key];
+              const visibleItems = isSlotExpanded ? items : items.slice(0, 3);
+              const hiddenCount = items.length - 3;
+
               return (
-                <View key={idx} style={styles.aiSuggestionCard}>
-                  <View style={styles.aiSuggestionContent}>
-                    <View style={styles.aiSuggestionHeader}>
-                      <Text style={styles.aiSuggestionName}>{suggestion.name}</Text>
-                      {slotConfig && (
-                        <View
-                          style={[
-                            styles.aiSuggestionSlotBadge,
-                            { backgroundColor: slotConfig.bgColor },
-                          ]}
-                        >
-                          <Text style={[styles.aiSuggestionSlotText, { color: slotConfig.color }]}>
-                            {slotConfig.emoji} {slotConfig.label}
-                          </Text>
-                        </View>
-                      )}
+                <View key={slot.key} style={styles.aiSlotSection}>
+                  {/* Slot Header with time range */}
+                  <View style={[styles.aiSlotHeader, { backgroundColor: slot.bgColor }]}>
+                    <Text style={{ fontSize: 14 }}>{slot.emoji}</Text>
+                    <View style={styles.aiSlotHeaderContent}>
+                      <Text style={[styles.aiSlotLabel, { color: slot.color }]}>
+                        {slot.label}
+                      </Text>
+                      <Text style={styles.aiSlotTimeRange}>
+                        {AI_SLOT_CONFIG[slot.key].timeRange}
+                      </Text>
                     </View>
-                    {suggestion.description ? (
-                      <Text style={styles.aiSuggestionDesc} numberOfLines={2}>
-                        {suggestion.description}
-                      </Text>
-                    ) : null}
-                    <View style={styles.aiSuggestionMeta}>
-                      <Text style={styles.aiSuggestionMetaItem}>
-                        {suggestion.duration}h
-                      </Text>
-                      <Text style={styles.aiSuggestionMetaItem}>
-                        {'\u2605'} {suggestion.rating.toFixed(1)}
-                      </Text>
-                      <Text style={styles.aiSuggestionMetaItem}>{suggestion.category}</Text>
+                    <View style={[styles.aiSlotCount, { backgroundColor: slot.color }]}>
+                      <Text style={styles.aiSlotCountText}>{items.length}</Text>
                     </View>
                   </View>
-                  <TouchableOpacity
-                    style={styles.aiAddBtn}
-                    onPress={() => handleAddActivity(suggestion)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="add" size={20} color="#ffffff" />
-                  </TouchableOpacity>
+
+                  {/* Suggestion Cards with thumbnails */}
+                  {visibleItems.map((suggestion, idx) => (
+                    <View key={idx} style={styles.aiSuggestionCard}>
+                      <ActivityImage
+                        activity={suggestion}
+                        destinationName={currentDestination?.name}
+                        size={44}
+                        borderRadius={8}
+                        fallbackColor={slot.bgColor}
+                        fallbackIconColor={slot.color}
+                      />
+                      <View style={styles.aiSuggestionContent}>
+                        <Text style={styles.aiSuggestionName} numberOfLines={1}>
+                          {suggestion.name}
+                        </Text>
+                        {suggestion.description ? (
+                          <Text style={styles.aiSuggestionDesc} numberOfLines={1}>
+                            {suggestion.description}
+                          </Text>
+                        ) : null}
+                        <View style={styles.aiSuggestionMeta}>
+                          <View style={styles.aiSuggestionMetaItem}>
+                            <Ionicons name="star" size={9} color="#f59e0b" />
+                            <Text style={styles.aiSuggestionMetaText}>{suggestion.rating.toFixed(1)}</Text>
+                          </View>
+                          <View style={styles.aiSuggestionMetaItem}>
+                            <Ionicons name="time-outline" size={9} color={colors.textTertiary} />
+                            <Text style={styles.aiSuggestionMetaText}>{suggestion.duration}h</Text>
+                          </View>
+                          {suggestion.category ? (
+                            <View style={[styles.aiCategoryPill, { backgroundColor: slot.bgColor }]}>
+                              <Text style={[styles.aiCategoryPillText, { color: slot.color }]}>
+                                {suggestion.category}
+                              </Text>
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.aiAddBtn}
+                        onPress={() => handleAddActivity(suggestion)}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons name="add" size={16} color="#ffffff" />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+
+                  {/* Show more / Show less */}
+                  {hiddenCount > 0 && (
+                    <TouchableOpacity
+                      style={styles.aiShowMoreBtn}
+                      onPress={() => setAiExpandedSlots((prev) => ({ ...prev, [slot.key]: !prev[slot.key] }))}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.aiShowMoreText, { color: slot.color }]}>
+                        {isSlotExpanded ? 'Show less' : `Show ${hiddenCount} more`}
+                      </Text>
+                      <Ionicons
+                        name={isSlotExpanded ? 'chevron-up' : 'chevron-down'}
+                        size={14}
+                        color={slot.color}
+                      />
+                    </TouchableOpacity>
+                  )}
                 </View>
               );
             })}
+            <Text style={styles.aiFooter}>Powered by Gemini AI</Text>
           </ScrollView>
         )}
       </View>
     );
   };
 
-  // ─── Render: Search Modal ───
-
-  const renderSearchModal = () => (
-    <Modal
-      visible={showSearchModal}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={() => setShowSearchModal(false)}
-    >
-      <SafeAreaView style={styles.modalSafeArea} edges={['top']}>
-        {/* Modal Header */}
-        <View style={styles.modalHeader}>
-          <TouchableOpacity
-            onPress={() => setShowSearchModal(false)}
-            style={styles.modalCloseBtn}
-          >
-            <Ionicons name="close" size={24} color={colors.text} />
-          </TouchableOpacity>
-          <Text style={styles.modalTitle}>Add Activity</Text>
-          <View style={styles.modalHeaderSpacer} />
-        </View>
-
-        {/* Slot Badge */}
-        <View style={styles.modalSlotInfo}>
-          {(() => {
-            const slotConfig = TIME_SLOTS.find((s) => s.key === activeSlot);
-            return slotConfig ? (
-              <View style={[styles.modalSlotBadge, { backgroundColor: slotConfig.bgColor }]}>
-                <Text style={{ color: slotConfig.color, fontWeight: fontWeight.medium }}>
-                  {slotConfig.emoji} {slotConfig.label} - Day {(currentDay?.dayNumber || 1)}
-                </Text>
-              </View>
-            ) : null;
-          })()}
-          {currentDestination && (
-            <Text style={styles.modalDestName}>{currentDestination.name}</Text>
-          )}
-        </View>
-
-        {/* Search Input */}
-        <View style={styles.modalSearchRow}>
-          <View style={styles.modalSearchInput}>
-            <Ionicons name="search" size={18} color={colors.textTertiary} />
-            <TextInput
-              style={styles.modalSearchTextInput}
-              placeholder={`Search activities in ${currentDestination?.name || 'destination'}...`}
-              placeholderTextColor={colors.textTertiary}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              returnKeyType="search"
-              onSubmitEditing={handleSearch}
-              autoFocus
-            />
-            {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
-                <Ionicons name="close-circle" size={18} color={colors.textTertiary} />
-              </TouchableOpacity>
-            )}
-          </View>
-          <TouchableOpacity style={styles.modalSearchBtn} onPress={handleSearch} activeOpacity={0.7}>
-            <Text style={styles.modalSearchBtnText}>Search</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Search Results */}
-        {isSearching ? (
-          <View style={styles.modalLoading}>
-            <ActivityIndicator size="large" color={colors.primary[500]} />
-            <Text style={styles.modalLoadingText}>Searching activities...</Text>
-          </View>
-        ) : searchResults.length > 0 ? (
-          <FlatList
-            data={searchResults}
-            keyExtractor={(item, idx) => `${item.name}-${idx}`}
-            contentContainerStyle={styles.modalResultsList}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={styles.modalResultCard}
-                onPress={() => {
-                  handleAddActivity(item);
-                  setShowSearchModal(false);
-                }}
-                activeOpacity={0.7}
-              >
-                <View style={styles.modalResultContent}>
-                  <Text style={styles.modalResultName}>{item.name}</Text>
-                  {item.description ? (
-                    <Text style={styles.modalResultDesc} numberOfLines={2}>
-                      {item.description}
-                    </Text>
-                  ) : null}
-                  <View style={styles.modalResultMeta}>
-                    <Text style={styles.modalResultMetaItem}>{item.category}</Text>
-                    <Text style={styles.modalResultMetaItem}>
-                      {'\u2605'} {item.rating.toFixed(1)}
-                    </Text>
-                    <Text style={styles.modalResultMetaItem}>{item.duration}h</Text>
-                  </View>
-                </View>
-                <Ionicons name="add-circle" size={28} color={colors.primary[500]} />
-              </TouchableOpacity>
-            )}
-            ItemSeparatorComponent={() => <View style={styles.modalDivider} />}
-          />
-        ) : (
-          <View style={styles.modalEmpty}>
-            <Ionicons name="search-outline" size={48} color={colors.gray[300]} />
-            <Text style={styles.modalEmptyTitle}>Search for activities</Text>
-            <Text style={styles.modalEmptySubtitle}>
-              Find things to do in {currentDestination?.name || 'your destination'}
-            </Text>
-          </View>
-        )}
-      </SafeAreaView>
-    </Modal>
-  );
+  // Search modal removed — replaced by inline add panel in scroll content
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
@@ -704,12 +925,70 @@ export default function DayPlannerScreen() {
           <Text style={styles.stepIndicator}>Step 3 of 4</Text>
           <Text style={styles.headerTitle}>Day Planner</Text>
         </View>
-        <View style={styles.headerSpacer} />
+        <View style={styles.headerRight}>
+          <CollaboratorAvatars onPress={() => inviteSheetRef.current?.expand()} />
+          <TouchableOpacity
+            style={styles.inviteHeaderBtn}
+            onPress={() => inviteSheetRef.current?.expand()}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="person-add-outline" size={16} color={colors.primary[500]} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.budgetHeaderBtn}
+            onPress={() => budgetSheetRef.current?.expand()}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="wallet-outline" size={20} color={colors.primary[500]} />
+          </TouchableOpacity>
+        </View>
       </View>
 
-      {/* ── Progress Bar ── */}
-      <View style={styles.progressBar}>
-        <View style={[styles.progressFill, { width: '75%' }]} />
+      {/* ── Step Navigation ── */}
+      <View style={styles.stepNav}>
+        {[
+          { step: 1, label: 'Setup', route: '/trip/setup' },
+          { step: 2, label: 'Destinations', route: '/trip/destinations' },
+          { step: 3, label: 'Planner', route: null },
+          { step: 4, label: 'Review', route: '/trip/review' },
+        ].map((item, idx) => {
+          const isCurrent = item.step === 3;
+          const isCompleted = item.step < 3;
+          return (
+            <React.Fragment key={item.step}>
+              {idx > 0 && (
+                <View style={[styles.stepConnector, (isCompleted || isCurrent) && styles.stepConnectorActive]} />
+              )}
+              <TouchableOpacity
+                style={[
+                  styles.stepDot,
+                  isCompleted && styles.stepDotCompleted,
+                  isCurrent && styles.stepDotCurrent,
+                ]}
+                onPress={() => {
+                  if (item.route && item.step !== 3) {
+                    setCurrentStep(item.step);
+                    if (item.step < 3) {
+                      router.back();
+                    } else {
+                      router.push(item.route as any);
+                    }
+                  }
+                }}
+                disabled={isCurrent}
+                activeOpacity={0.7}
+              >
+                {isCompleted ? (
+                  <Ionicons name="checkmark" size={10} color="#ffffff" />
+                ) : (
+                  <Text style={[styles.stepDotText, isCurrent && styles.stepDotTextCurrent]}>
+                    {item.step}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </React.Fragment>
+          );
+        })}
       </View>
 
       {/* ── Day Tabs ── */}
@@ -720,12 +999,26 @@ export default function DayPlannerScreen() {
         <View style={styles.dayInfoBar}>
           <View style={styles.dayInfoLeft}>
             <Text style={styles.dayInfoTitle}>{currentDay.title}</Text>
-            {dayDate ? <Text style={styles.dayInfoDate}>{dayDate}</Text> : null}
+            <View style={styles.dayInfoSubRow}>
+              {dayDate ? <Text style={styles.dayInfoDate}>{dayDate}</Text> : null}
+              {currentDestination?.name ? (
+                <WeatherBadge destinationName={currentDestination.name} />
+              ) : null}
+            </View>
           </View>
-          <TouchableOpacity style={styles.aiButton} onPress={handleGenerateAI} activeOpacity={0.7}>
-            <Ionicons name="sparkles" size={16} color="#ffffff" />
-            <Text style={styles.aiButtonText}>AI Suggestions</Text>
-          </TouchableOpacity>
+          <View style={styles.dayInfoActions}>
+            <OptimizeRouteButton dayIndex={selectedDayIndex} />
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => smartBuilderRef.current?.expand()}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="flash" size={16} color="#ffffff" />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.iconBtnCyan} onPress={handleGenerateAI} activeOpacity={0.7}>
+              <Ionicons name="sparkles" size={16} color="#ffffff" />
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
@@ -734,16 +1027,319 @@ export default function DayPlannerScreen() {
         style={styles.flex}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
+        scrollEnabled={scrollEnabled}
       >
         {/* AI Suggestions Panel */}
         {renderAISuggestions()}
 
-        {/* Time Slot Sections */}
-        {TIME_SLOTS.map(renderTimeSlot)}
+        {/* ── Activity List with Drag-to-Reorder ── */}
+        <DraggableActivityList
+          dayIndex={selectedDayIndex}
+          activities={currentActivities}
+          destinationName={currentDestination?.name}
+          expandedCards={expandedCards}
+          onToggleExpand={toggleCardExpand}
+          onEditActivity={handleEditActivity}
+          onRemoveActivity={handleRemoveActivity}
+          onReorder={reorderActivities}
+          onDragStart={() => setScrollEnabled(false)}
+          onDragEnd={() => setScrollEnabled(true)}
+        />
 
-        {/* Bottom spacer */}
-        <View style={{ height: 100 }} />
+        {/* ── Add Activity Button (opens inline panel) ── */}
+        <TouchableOpacity
+          style={styles.addActivityBtn}
+          onPress={() => handleOpenAddPanel()}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="add-circle-outline" size={20} color={colors.primary[500]} />
+          <Text style={styles.addActivityText}>Add Activity</Text>
+        </TouchableOpacity>
+
+        {/* ── Inline Add Activity Panel ── */}
+        {showAddPanel && (
+          <View style={styles.inlineAddPanel}>
+            {/* Panel Header */}
+            <View style={styles.inlineAddHeader}>
+              <Text style={styles.inlineAddTitle}>Add Activity</Text>
+              <TouchableOpacity onPress={() => setShowAddPanel(false)}>
+                <Ionicons name="close" size={20} color={colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Time Slot Picker (icon-only) */}
+            <View style={styles.inlineSlotPicker}>
+              {TIME_SLOTS.map((slot) => (
+                <TouchableOpacity
+                  key={slot.key}
+                  style={[
+                    styles.inlineSlotBtn,
+                    { backgroundColor: slot.bgColor },
+                    activeSlot === slot.key && { borderColor: slot.color, borderWidth: 2 },
+                  ]}
+                  onPress={() => setActiveSlot(slot.key)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={{ fontSize: 16 }}>{slot.emoji}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Search Input */}
+            <View style={styles.inlineSearchRow}>
+              <View style={styles.inlineSearchInput}>
+                <Ionicons name="search" size={16} color={colors.textTertiary} />
+                <TextInput
+                  style={styles.inlineSearchTextInput}
+                  placeholder={`Search in ${currentDestination?.name || 'destination'}...`}
+                  placeholderTextColor={colors.textTertiary}
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  returnKeyType="search"
+                  onSubmitEditing={handleSearch}
+                />
+              </View>
+              <TouchableOpacity style={styles.inlineSearchBtn} onPress={handleSearch} activeOpacity={0.7}>
+                <Ionicons name="search" size={16} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Results */}
+            {isSearching ? (
+              <View style={styles.inlineLoading}>
+                <ActivityIndicator size="small" color={colors.primary[500]} />
+                <Text style={styles.inlineLoadingText}>Searching...</Text>
+              </View>
+            ) : searchResults.length > 0 ? (
+              <ScrollView style={styles.inlineResults} nestedScrollEnabled>
+                {!searchQuery.trim() && (
+                  <View style={styles.inlinePopularHeader}>
+                    <Ionicons name="trending-up" size={14} color={colors.primary[500]} />
+                    <Text style={styles.inlinePopularText}>
+                      Popular in {currentDestination?.name}
+                    </Text>
+                  </View>
+                )}
+                {searchResults.map((item, ridx) => (
+                  <TouchableOpacity
+                    key={`${item.name}-${ridx}`}
+                    style={styles.inlineResultCard}
+                    onPress={() => {
+                      handleAddActivity({ ...item, timeSlot: activeSlot });
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <ActivityImage
+                      activity={item}
+                      destinationName={currentDestination?.name}
+                      size={40}
+                      borderRadius={borderRadius.md}
+                      fallbackColor={colors.gray[100]}
+                      fallbackIconColor={colors.gray[400]}
+                    />
+                    <View style={styles.inlineResultContent}>
+                      <Text style={styles.inlineResultName} numberOfLines={1}>{item.name}</Text>
+                      <View style={styles.inlineResultMeta}>
+                        <Text style={styles.inlineResultMetaText}>
+                          {'\u2605'} {item.rating.toFixed(1)}
+                        </Text>
+                        <Text style={styles.inlineResultMetaText}>{item.duration}h</Text>
+                        {item.category ? (
+                          <Text style={styles.inlineResultMetaText}>{item.category}</Text>
+                        ) : null}
+                      </View>
+                    </View>
+                    <Ionicons name="add-circle" size={24} color={colors.primary[500]} />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            ) : (
+              <View style={styles.inlineEmpty}>
+                <Text style={styles.inlineEmptyText}>
+                  Search or browse popular places above
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* ── Budget Tracker (below activities, full width) ── */}
+        <TouchableOpacity
+          style={styles.budgetInlineBtn}
+          onPress={() => budgetSheetRef.current?.expand()}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="wallet-outline" size={18} color="#f59e0b" />
+          <Text style={styles.budgetInlineBtnText}>Budget Tracker</Text>
+          <Ionicons name="chevron-forward" size={16} color={colors.textTertiary} />
+        </TouchableOpacity>
+
+        {/* ── View Schedule Button ── */}
+        {currentActivities.length > 0 && (
+          <TouchableOpacity
+            style={styles.viewScheduleBtn}
+            onPress={() => setShowScheduleModal(true)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="grid-outline" size={16} color="#0d9488" />
+            <Text style={styles.viewScheduleBtnText}>View Day Schedule</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* ── Day Notes ── */}
+        <View style={styles.dayNotesSection}>
+          <View style={styles.dayNotesHeader}>
+            <Ionicons name="document-text-outline" size={16} color={colors.textSecondary} />
+            <Text style={styles.dayNotesLabel}>Day Notes</Text>
+          </View>
+          <TextInput
+            style={styles.dayNotesInput}
+            value={dayNotesText}
+            onChangeText={setDayNotesText}
+            onBlur={handleSaveDayNotes}
+            placeholder="Add notes for this day..."
+            placeholderTextColor={colors.textTertiary}
+            multiline
+            numberOfLines={2}
+            textAlignVertical="top"
+          />
+        </View>
+
+        {/* Bottom spacer for floating buttons */}
+        <View style={{ height: 120 }} />
       </ScrollView>
+
+      {/* ── Floating Map Button (sticky at bottom center) ── */}
+      {currentActivities.length > 0 && (
+        <TouchableOpacity
+          style={styles.floatingMapBtn}
+          onPress={() => setShowMapModal(true)}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="map" size={15} color="#10b981" />
+          <Text style={styles.floatingMapBtnText}>View Map</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* ── Map Modal ── */}
+      <Modal
+        visible={showMapModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowMapModal(false)}
+      >
+        <SafeAreaView style={styles.mapModalSafeArea} edges={['top']}>
+          <View style={styles.mapModalHeader}>
+            <View>
+              <Text style={styles.mapModalTitle}>
+                {currentDay?.title || 'Day'} Map
+              </Text>
+              <Text style={styles.mapModalSubtitle}>
+                {currentActivities.length} places{currentDestination?.name ? ` · ${currentDestination.name}` : ''}
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setShowMapModal(false)}
+              style={styles.mapModalCloseBtn}
+            >
+              <Ionicons name="close" size={22} color={colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.mapModalContent}>
+            <ItineraryMap
+              places={currentActivities}
+              visible={true}
+              onClose={() => setShowMapModal(false)}
+              dayTitle={currentDay?.title}
+              inline
+              height={Dimensions.get('window').height - 160}
+            />
+          </View>
+        </SafeAreaView>
+      </Modal>
+
+      {/* ── Schedule Modal ── */}
+      <Modal
+        visible={showScheduleModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowScheduleModal(false)}
+        statusBarTranslucent
+      >
+        <View style={styles.scheduleOverlay}>
+          <View style={styles.scheduleSheet}>
+            <View style={styles.scheduleHeader}>
+              <View style={styles.scheduleHeaderLeft}>
+                <Ionicons name="grid-outline" size={18} color="#0d9488" />
+                <View>
+                  <Text style={styles.scheduleTitle}>
+                    {currentDay?.title || 'Day'} Schedule
+                  </Text>
+                  <Text style={styles.scheduleSubtitle}>
+                    {currentActivities.length} activities{currentDestination?.name ? ` · ${currentDestination.name}` : ''}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setShowScheduleModal(false)}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.scheduleBody}>
+              {/* Table Header */}
+              <View style={styles.scheduleTableHeader}>
+                <Text style={[styles.scheduleTableHeaderText, { width: 30 }]}>#</Text>
+                <Text style={[styles.scheduleTableHeaderText, { width: 70 }]}>Time</Text>
+                <Text style={[styles.scheduleTableHeaderText, { flex: 1 }]}>Activity</Text>
+              </View>
+
+              {/* Table Rows */}
+              {currentActivities.map((activity, idx) => {
+                const slotConfig = TIME_SLOTS.find((s) => s.key === activity.timeSlot);
+                const slotActivities = currentActivities.filter((a) => a.timeSlot === activity.timeSlot);
+                const slotIdx = slotActivities.indexOf(activity);
+                const time = getTimeForSlot(activity.timeSlot, slotIdx);
+                const endHour = activity.duration || 2;
+                return (
+                  <View
+                    key={idx}
+                    style={[
+                      styles.scheduleRow,
+                      idx % 2 === 1 && styles.scheduleRowAlt,
+                    ]}
+                  >
+                    <Text style={[styles.scheduleRowNum, { width: 30 }]}>{idx + 1}</Text>
+                    <View style={{ width: 70 }}>
+                      <View style={[styles.scheduleSlotBadge, { backgroundColor: slotConfig?.bgColor || colors.gray[100] }]}>
+                        <Text style={[styles.scheduleSlotBadgeText, { color: slotConfig?.color || colors.textSecondary }]}>
+                          {slotConfig?.emoji} {time || slotConfig?.label}
+                        </Text>
+                      </View>
+                      {endHour ? <Text style={styles.scheduleDuration}>{endHour}h</Text> : null}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.scheduleActivityName}>{activity.name}</Text>
+                      {activity.notes ? (
+                        <Text style={styles.scheduleActivityNotes} numberOfLines={1}>
+                          {activity.notes}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+                );
+              })}
+
+              {/* Day Notes */}
+              {currentDay?.notes ? (
+                <View style={styles.scheduleNotesSection}>
+                  <Ionicons name="document-text-outline" size={14} color={colors.textTertiary} />
+                  <Text style={styles.scheduleNotesText}>{currentDay.notes}</Text>
+                </View>
+              ) : null}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* ── Bottom Bar ── */}
       <View style={styles.bottomBar}>
@@ -757,8 +1353,115 @@ export default function DayPlannerScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* ── Search Modal ── */}
-      {renderSearchModal()}
+      {/* Search modal removed — inline add panel used instead */}
+
+      {/* ── Smart Itinerary Builder Bottom Sheet ── */}
+      <SmartItineraryBuilder
+        sheetRef={smartBuilderRef}
+        dayIndex={selectedDayIndex}
+        destinationName={currentDestination?.name || ''}
+        tripType={tripType}
+        budget={budget}
+        existingActivities={currentActivities}
+      />
+
+      {/* ── Budget Tracker Bottom Sheet ── */}
+      <BudgetTrackerSheet sheetRef={budgetSheetRef} />
+
+      {/* ── SOS Emergency Button ── */}
+      <SOSButton destinationName={currentDestination?.name} />
+
+      {/* ── Invite Collaborators Bottom Sheet ── */}
+      <InviteSheet sheetRef={inviteSheetRef} />
+
+      {/* ── Trip Chat FAB + Bottom Sheet ── */}
+      <TripChatSheet sheetRef={chatSheetRef} />
+
+      {/* ── Activity Edit Modal ── */}
+      <Modal
+        visible={editingActivity !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setEditingActivity(null)}
+        statusBarTranslucent
+      >
+        <View style={styles.editOverlay}>
+          <View style={styles.editSheet}>
+            {editingActivity && (
+              <>
+                <View style={styles.editHeader}>
+                  <Text style={styles.editTitle} numberOfLines={1}>
+                    {editingActivity.activity.name}
+                  </Text>
+                  <TouchableOpacity onPress={() => setEditingActivity(null)}>
+                    <Ionicons name="close" size={22} color={colors.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Time Slot Picker */}
+                <Text style={styles.editSectionLabel}>Time Slot</Text>
+                <View style={styles.editSlotRow}>
+                  {TIME_SLOTS.map((slot) => (
+                    <TouchableOpacity
+                      key={slot.key}
+                      style={[
+                        styles.editSlotBtn,
+                        { backgroundColor: slot.bgColor, borderColor: slot.color },
+                        editingActivity.activity.timeSlot === slot.key && styles.editSlotBtnActive,
+                      ]}
+                      onPress={() => handleChangeTimeSlot(slot.key)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={{ fontSize: 14 }}>{slot.emoji}</Text>
+                      <Text
+                        style={[
+                          styles.editSlotBtnText,
+                          { color: slot.color },
+                          editingActivity.activity.timeSlot === slot.key && { fontWeight: fontWeight.bold },
+                        ]}
+                      >
+                        {slot.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {/* Notes */}
+                <Text style={styles.editSectionLabel}>Notes</Text>
+                <TextInput
+                  style={styles.editNotesInput}
+                  value={editNotes}
+                  onChangeText={setEditNotes}
+                  placeholder="Add notes about this activity..."
+                  placeholderTextColor={colors.textTertiary}
+                  multiline
+                  numberOfLines={3}
+                  textAlignVertical="top"
+                />
+
+                {/* Save Button */}
+                <TouchableOpacity
+                  style={styles.editSaveBtn}
+                  onPress={handleSaveNotes}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.editSaveBtnText}>Save Notes</Text>
+                </TouchableOpacity>
+
+                {/* Activity Details */}
+                {editingActivity.activity.description ? (
+                  <View style={styles.editDetailSection}>
+                    <Text style={styles.editSectionLabel}>Description</Text>
+                    <Text style={styles.editDetailText}>
+                      {editingActivity.activity.description}
+                    </Text>
+                  </View>
+                ) : null}
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -812,17 +1515,79 @@ const styles = StyleSheet.create({
   headerSpacer: {
     width: 40,
   },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  inviteHeaderBtn: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.primary[50],
+  },
+  budgetHeaderBtn: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.primary[50],
+  },
+  dayInfoSubRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: 2,
+  },
 
-  // Progress Bar
-  progressBar: {
-    height: 3,
+  // Step Navigation
+  stepNav: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  stepDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: colors.gray[200],
   },
-  progressFill: {
-    height: '100%',
-    backgroundColor: colors.primary[500],
-    borderTopRightRadius: 2,
-    borderBottomRightRadius: 2,
+  stepDotCompleted: {
+    backgroundColor: '#f97316',
+  },
+  stepDotCurrent: {
+    backgroundColor: '#f97316',
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+  },
+  stepDotText: {
+    fontSize: 10,
+    fontWeight: fontWeight.bold,
+    color: colors.textTertiary,
+  },
+  stepDotTextCurrent: {
+    color: '#ffffff',
+  },
+  stepConnector: {
+    flex: 1,
+    height: 2,
+    backgroundColor: colors.gray[200],
+    marginHorizontal: spacing.xs,
+    maxWidth: 50,
+  },
+  stepConnectorActive: {
+    backgroundColor: '#f97316',
   },
 
   // Day Tabs
@@ -849,8 +1614,8 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   dayTabSelected: {
-    borderColor: colors.primary[500],
-    backgroundColor: colors.primary[500],
+    borderColor: '#8b5cf6',
+    backgroundColor: '#f5f3ff',
   },
   dayTabLabel: {
     fontSize: fontSize.sm,
@@ -858,7 +1623,7 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
   },
   dayTabLabelSelected: {
-    color: '#ffffff',
+    color: '#8b5cf6',
   },
   dayTabDest: {
     fontSize: fontSize.xs,
@@ -867,7 +1632,7 @@ const styles = StyleSheet.create({
     maxWidth: 80,
   },
   dayTabDestSelected: {
-    color: 'rgba(255,255,255,0.8)',
+    color: '#7c3aed',
   },
   dayTabBadge: {
     position: 'absolute',
@@ -881,7 +1646,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   dayTabBadgeSelected: {
-    backgroundColor: colors.primary[700],
+    backgroundColor: '#8b5cf6',
   },
   dayTabBadgeText: {
     fontSize: 10,
@@ -918,136 +1683,92 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
 
-  // AI Button
-  aiButton: {
+  // Floating Map Button
+  floatingMapBtn: {
+    position: 'absolute',
+    bottom: 80,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.full,
+    backgroundColor: '#ffffff',
+    ...shadow.lg,
+    zIndex: 30,
+  },
+  floatingMapBtnText: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: '#10b981',
+  },
+  // Map Modal
+  mapModalSafeArea: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  mapModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  mapModalTitle: {
+    fontSize: fontSize.lg,
+    fontWeight: fontWeight.bold,
+    color: colors.text,
+  },
+  mapModalSubtitle: {
+    fontSize: fontSize.xs,
+    color: colors.textTertiary,
+    marginTop: 2,
+  },
+  mapModalCloseBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 18,
+    backgroundColor: colors.gray[100],
+  },
+  mapModalContent: {
+    flex: 1,
+  },
+
+  // Day Info Actions
+  dayInfoActions: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+  },
+  // Icon-only toolbar buttons (PWA mobile compact style)
+  iconBtn: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: borderRadius.full,
-    backgroundColor: colors.primary[500],
+    backgroundColor: '#a855f7',
     ...shadow.sm,
   },
-  aiButtonText: {
-    fontSize: fontSize.xs,
-    fontWeight: fontWeight.semibold,
-    color: '#ffffff',
+  iconBtnCyan: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: borderRadius.full,
+    backgroundColor: '#06b6d4',
+    ...shadow.sm,
   },
 
   // Scroll Content
   scrollContent: {
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.md,
-  },
-
-  // Time Slot Section
-  timeSlotSection: {
-    marginBottom: spacing.lg,
-  },
-  timeSlotHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.lg,
-  },
-  timeSlotHeaderLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  timeSlotEmoji: {
-    fontSize: 18,
-  },
-  timeSlotLabel: {
-    fontSize: fontSize.md,
-    fontWeight: fontWeight.semibold,
-  },
-  timeSlotCount: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  timeSlotCountText: {
-    fontSize: 11,
-    fontWeight: fontWeight.bold,
-    color: '#ffffff',
-  },
-  timeSlotBody: {
-    paddingTop: spacing.sm,
-    paddingLeft: spacing.sm,
-  },
-
-  // Empty Slot
-  emptySlot: {
-    paddingVertical: spacing.lg,
-    alignItems: 'center',
-  },
-  emptySlotText: {
-    fontSize: fontSize.sm,
-    color: colors.textTertiary,
-    fontStyle: 'italic',
-  },
-
-  // Activity Card
-  activityCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.background,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: borderRadius.lg,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-    gap: spacing.md,
-    ...shadow.sm,
-  },
-  activityImage: {
-    width: 52,
-    height: 52,
-    borderRadius: borderRadius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  activityContent: {
-    flex: 1,
-  },
-  activityName: {
-    fontSize: fontSize.sm,
-    fontWeight: fontWeight.semibold,
-    color: colors.text,
-  },
-  activityDescription: {
-    fontSize: fontSize.xs,
-    color: colors.textTertiary,
-    marginTop: 2,
-    lineHeight: 16,
-  },
-  activityMeta: {
-    flexDirection: 'row',
-    gap: spacing.md,
-    marginTop: spacing.xs,
-  },
-  activityMetaItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-  },
-  activityMetaText: {
-    fontSize: fontSize.xs,
-    color: colors.textTertiary,
-  },
-  activityDeleteBtn: {
-    width: 32,
-    height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.errorLight,
   },
 
   // Add Activity Button
@@ -1074,7 +1795,7 @@ const styles = StyleSheet.create({
   aiPanel: {
     backgroundColor: colors.background,
     borderWidth: 1,
-    borderColor: colors.primary[200],
+    borderColor: '#a5f3fc',
     borderRadius: borderRadius.xl,
     marginBottom: spacing.lg,
     overflow: 'hidden',
@@ -1085,14 +1806,32 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
-    backgroundColor: colors.primary[50],
+    backgroundColor: '#ecfeff',
     borderBottomWidth: 1,
-    borderBottomColor: colors.primary[100],
+    borderBottomColor: '#a5f3fc',
+  },
+  aiPanelHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  aiPanelHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  aiRefreshBtn: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+    backgroundColor: '#cffafe',
   },
   aiPanelTitle: {
     fontSize: fontSize.md,
     fontWeight: fontWeight.semibold,
-    color: colors.primary[700],
+    color: '#0891b2',
   },
   aiLoading: {
     alignItems: 'center',
@@ -1107,6 +1846,8 @@ const styles = StyleSheet.create({
   aiLoadingSubtext: {
     fontSize: fontSize.sm,
     color: colors.textTertiary,
+    textAlign: 'center',
+    paddingHorizontal: spacing.lg,
   },
   aiEmpty: {
     alignItems: 'center',
@@ -1118,14 +1859,50 @@ const styles = StyleSheet.create({
     color: colors.textTertiary,
   },
   aiSuggestionsList: {
-    maxHeight: 350,
+    maxHeight: 400,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
+  },
+  aiSlotSection: {
+    marginBottom: spacing.md,
+  },
+  aiSlotHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.lg,
+    marginBottom: spacing.xs,
+  },
+  aiSlotHeaderContent: {
+    flex: 1,
+  },
+  aiSlotLabel: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+  },
+  aiSlotTimeRange: {
+    fontSize: 10,
+    color: colors.textTertiary,
+    marginTop: 1,
+  },
+  aiSlotCount: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  aiSlotCountText: {
+    fontSize: 10,
+    fontWeight: fontWeight.bold,
+    color: '#ffffff',
   },
   aiSuggestionCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
     paddingHorizontal: spacing.sm,
     borderBottomWidth: 1,
     borderBottomColor: colors.gray[100],
@@ -1133,27 +1910,12 @@ const styles = StyleSheet.create({
   },
   aiSuggestionContent: {
     flex: 1,
-  },
-  aiSuggestionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    flexWrap: 'wrap',
+    minWidth: 0,
   },
   aiSuggestionName: {
     fontSize: fontSize.sm,
     fontWeight: fontWeight.semibold,
     color: colors.text,
-    flex: 1,
-  },
-  aiSuggestionSlotBadge: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: borderRadius.sm,
-  },
-  aiSuggestionSlotText: {
-    fontSize: fontSize.xs,
-    fontWeight: fontWeight.medium,
   },
   aiSuggestionDesc: {
     fontSize: fontSize.xs,
@@ -1163,21 +1925,211 @@ const styles = StyleSheet.create({
   },
   aiSuggestionMeta: {
     flexDirection: 'row',
-    gap: spacing.md,
+    alignItems: 'center',
+    gap: spacing.sm,
     marginTop: spacing.xs,
   },
   aiSuggestionMetaItem: {
-    fontSize: fontSize.xs,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  aiSuggestionMetaText: {
+    fontSize: 10,
     color: colors.textSecondary,
   },
+  aiCategoryPill: {
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  aiCategoryPillText: {
+    fontSize: 9,
+    fontWeight: fontWeight.semibold,
+    textTransform: 'capitalize',
+  },
+  aiFooter: {
+    textAlign: 'center',
+    fontSize: 10,
+    color: colors.textTertiary,
+    paddingVertical: spacing.md,
+  },
   aiAddBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.primary[500],
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#06b6d4',
     alignItems: 'center',
     justifyContent: 'center',
-    ...shadow.sm,
+  },
+  aiShowMoreBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: spacing.sm,
+    marginTop: 2,
+  },
+  aiShowMoreText: {
+    fontSize: fontSize.xs,
+    fontWeight: fontWeight.medium,
+  },
+
+  // View Schedule Button
+  viewScheduleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+    marginBottom: spacing.lg,
+    borderRadius: borderRadius.lg,
+    backgroundColor: '#f0fdfa',
+    borderWidth: 1,
+    borderColor: '#99f6e4',
+  },
+  viewScheduleBtnText: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: '#0d9488',
+  },
+
+  // Day Notes
+  dayNotesSection: {
+    marginBottom: spacing.lg,
+  },
+  dayNotesHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  dayNotesLabel: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: colors.textSecondary,
+  },
+  dayNotesInput: {
+    fontSize: fontSize.sm,
+    color: colors.text,
+    backgroundColor: colors.gray[50],
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    minHeight: 60,
+    lineHeight: 20,
+  },
+
+  // Schedule Modal
+  scheduleOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  scheduleSheet: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '80%',
+    ...shadow.lg,
+  },
+  scheduleHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  scheduleHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  scheduleTitle: {
+    fontSize: fontSize.lg,
+    fontWeight: fontWeight.bold,
+    color: colors.text,
+  },
+  scheduleSubtitle: {
+    fontSize: fontSize.xs,
+    color: colors.textTertiary,
+    marginTop: 1,
+  },
+  scheduleBody: {
+    paddingBottom: Platform.OS === 'ios' ? spacing['3xl'] : spacing.lg,
+  },
+  scheduleTableHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0d9488',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  scheduleTableHeaderText: {
+    fontSize: fontSize.xs,
+    fontWeight: fontWeight.bold,
+    color: '#ffffff',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  scheduleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.gray[100],
+  },
+  scheduleRowAlt: {
+    backgroundColor: '#f0fdfa',
+  },
+  scheduleRowNum: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.bold,
+    color: colors.textSecondary,
+  },
+  scheduleSlotBadge: {
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignSelf: 'flex-start',
+  },
+  scheduleSlotBadgeText: {
+    fontSize: 9,
+    fontWeight: fontWeight.semibold,
+  },
+  scheduleDuration: {
+    fontSize: 10,
+    color: colors.textTertiary,
+    marginTop: 2,
+  },
+  scheduleActivityName: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: colors.text,
+  },
+  scheduleActivityNotes: {
+    fontSize: fontSize.xs,
+    color: colors.textTertiary,
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
+  scheduleNotesSection: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    backgroundColor: colors.gray[50],
+  },
+  scheduleNotesText: {
+    flex: 1,
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    lineHeight: 20,
   },
 
   // Empty Days State
@@ -1255,65 +2207,54 @@ const styles = StyleSheet.create({
     color: '#ffffff',
   },
 
-  // Modal
-  modalSafeArea: {
-    flex: 1,
+  // ── Inline Add Activity Panel ──
+  inlineAddPanel: {
     backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.primary[200],
+    borderRadius: borderRadius.xl,
+    marginTop: spacing.md,
+    marginBottom: spacing.lg,
+    overflow: 'hidden',
   },
-  modalHeader: {
+  inlineAddHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
+    backgroundColor: colors.primary[50],
     borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    borderBottomColor: colors.primary[100],
   },
-  modalCloseBtn: {
-    width: 40,
-    height: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.gray[100],
+  inlineAddTitle: {
+    fontSize: fontSize.md,
+    fontWeight: fontWeight.semibold,
+    color: colors.primary[700],
   },
-  modalTitle: {
-    flex: 1,
-    fontSize: fontSize.lg,
-    fontWeight: fontWeight.bold,
-    color: colors.text,
-    textAlign: 'center',
-  },
-  modalHeaderSpacer: {
-    width: 40,
-  },
-  modalSlotInfo: {
+  inlineSlotPicker: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.gray[50],
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  modalSlotBadge: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-    borderRadius: borderRadius.full,
-  },
-  modalDestName: {
-    fontSize: fontSize.sm,
-    fontWeight: fontWeight.medium,
-    color: colors.textSecondary,
-  },
-  modalSearchRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
   },
-  modalSearchInput: {
+  inlineSlotBtn: {
+    flex: 1,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: borderRadius.lg,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+  },
+  inlineSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.md,
+  },
+  inlineSearchInput: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
@@ -1324,86 +2265,193 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     gap: spacing.sm,
   },
-  modalSearchTextInput: {
+  inlineSearchTextInput: {
     flex: 1,
-    fontSize: fontSize.md,
+    fontSize: fontSize.sm,
     color: colors.text,
     paddingVertical: Platform.OS === 'ios' ? spacing.md : spacing.sm,
   },
-  modalSearchBtn: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+  inlineSearchBtn: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: borderRadius.lg,
     backgroundColor: colors.primary[500],
   },
-  modalSearchBtnText: {
-    fontSize: fontSize.sm,
-    fontWeight: fontWeight.semibold,
-    color: '#ffffff',
-  },
-  modalLoading: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.md,
-  },
-  modalLoadingText: {
-    fontSize: fontSize.sm,
-    color: colors.textTertiary,
-  },
-  modalResultsList: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-  },
-  modalResultCard: {
+  inlineLoading: {
     flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: spacing.lg,
-    gap: spacing.md,
-  },
-  modalResultContent: {
-    flex: 1,
-  },
-  modalResultName: {
-    fontSize: fontSize.md,
-    fontWeight: fontWeight.semibold,
-    color: colors.text,
-  },
-  modalResultDesc: {
-    fontSize: fontSize.xs,
-    color: colors.textTertiary,
-    marginTop: 2,
-    lineHeight: 16,
-  },
-  modalResultMeta: {
-    flexDirection: 'row',
-    gap: spacing.md,
-    marginTop: spacing.xs,
-  },
-  modalResultMetaItem: {
-    fontSize: fontSize.xs,
-    color: colors.textSecondary,
-    fontWeight: fontWeight.medium,
-  },
-  modalDivider: {
-    height: 1,
-    backgroundColor: colors.gray[100],
-  },
-  modalEmpty: {
-    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.sm,
+    paddingVertical: spacing.lg,
   },
-  modalEmptyTitle: {
-    fontSize: fontSize.lg,
-    fontWeight: fontWeight.semibold,
-    color: colors.textSecondary,
-  },
-  modalEmptySubtitle: {
+  inlineLoadingText: {
     fontSize: fontSize.sm,
     color: colors.textTertiary,
-    textAlign: 'center',
-    paddingHorizontal: spacing['3xl'],
+  },
+  inlineResults: {
+    maxHeight: 250,
+    paddingHorizontal: spacing.md,
+  },
+  inlinePopularHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  inlinePopularText: {
+    fontSize: fontSize.xs,
+    fontWeight: fontWeight.semibold,
+    color: colors.primary[600],
+  },
+  inlineResultCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    gap: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.gray[100],
+  },
+  inlineResultContent: {
+    flex: 1,
+    minWidth: 0,
+  },
+  inlineResultName: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: colors.text,
+  },
+  inlineResultMeta: {
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginTop: 2,
+  },
+  inlineResultMetaText: {
+    fontSize: 10,
+    color: colors.textSecondary,
+  },
+  inlineEmpty: {
+    alignItems: 'center',
+    paddingVertical: spacing.lg,
+  },
+  inlineEmptyText: {
+    fontSize: fontSize.sm,
+    color: colors.textTertiary,
+  },
+
+  // ── Budget Inline Button ──
+  budgetInlineBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    marginTop: spacing.md,
+    marginBottom: spacing.lg,
+    borderRadius: borderRadius.lg,
+    backgroundColor: '#fffbeb',
+    borderWidth: 1,
+    borderColor: '#fde68a',
+  },
+  budgetInlineBtnText: {
+    flex: 1,
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: '#92400e',
+  },
+
+  // Edit Activity Modal
+  editOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  editSheet: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: spacing.lg,
+    paddingBottom: Platform.OS === 'ios' ? spacing['3xl'] : spacing.lg,
+    maxHeight: '70%',
+    ...shadow.lg,
+  },
+  editHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+    gap: spacing.md,
+  },
+  editTitle: {
+    flex: 1,
+    fontSize: fontSize.lg,
+    fontWeight: fontWeight.bold,
+    color: colors.text,
+  },
+  editSectionLabel: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: colors.textSecondary,
+    marginBottom: spacing.sm,
+    marginTop: spacing.md,
+  },
+  editSlotRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  editSlotBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+  },
+  editSlotBtnActive: {
+    borderWidth: 2,
+  },
+  editSlotBtnText: {
+    fontSize: fontSize.xs,
+    fontWeight: fontWeight.medium,
+  },
+  editNotesInput: {
+    fontSize: fontSize.md,
+    color: colors.text,
+    backgroundColor: colors.gray[50],
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    minHeight: 80,
+  },
+  editSaveBtn: {
+    backgroundColor: colors.primary[500],
+    borderRadius: borderRadius.xl,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    marginTop: spacing.lg,
+    ...shadow.md,
+  },
+  editSaveBtnText: {
+    fontSize: fontSize.md,
+    fontWeight: fontWeight.semibold,
+    color: '#ffffff',
+  },
+  editDetailSection: {
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.gray[100],
+  },
+  editDetailText: {
+    fontSize: fontSize.sm,
+    color: colors.textSecondary,
+    lineHeight: 20,
   },
 });
