@@ -29,12 +29,14 @@ interface HeroCarouselProps {
     };
   };
   locationName: string;
+  onPlacePress?: (place: any) => void;
 }
 
 export const HeroCarousel: React.FC<HeroCarouselProps> = ({
   places,
   hero,
   locationName,
+  onPlacePress,
 }) => {
   const { isDarkMode, themeColors } = useTheme();
   const [currentSlide, setCurrentSlide] = useState(0);
@@ -70,7 +72,12 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({
   return (
     <View style={styles.container}>
       {/* Slide Image */}
-      <View style={styles.slideContainer}>
+      <TouchableOpacity
+        style={styles.slideContainer}
+        activeOpacity={onPlacePress ? 0.8 : 1}
+        onPress={() => onPlacePress && currentPlace && onPlacePress(currentPlace)}
+        disabled={!onPlacePress}
+      >
         {imageUrl ? (
           <Image
             source={{ uri: imageUrl }}
@@ -117,7 +124,14 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({
             </Text>
           </View>
         )}
-      </View>
+
+        {/* Add badge (shown when onPlacePress is provided) */}
+        {onPlacePress && currentPlace && (
+          <View style={styles.addBadge}>
+            <Ionicons name="add" size={20} color="#ffffff" />
+          </View>
+        )}
+      </TouchableOpacity>
 
       {/* Dot Indicators */}
       {slideCount > 1 && (
@@ -254,6 +268,22 @@ const styles = StyleSheet.create({
   dotInactive: {
     width: 8,
     backgroundColor: 'rgba(255,255,255,0.4)',
+  },
+  addBadge: {
+    position: 'absolute',
+    top: spacing.md,
+    right: spacing.lg,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.primary[500],
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
 });
 

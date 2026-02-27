@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -35,8 +35,16 @@ import {
   type LuxuryPlace,
 } from '@prayana/shared-utils';
 
+// Shared destination components (same as destination/[location]/index.tsx)
+import { HeroCarousel } from '../../components/destination/HeroCarousel';
+import { ExperienceTagFilters } from '../../components/destination/ExperienceTagFilters';
+import { HeritageCircuits } from '../../components/destination/HeritageCircuits';
+import { HiddenGems } from '../../components/destination/HiddenGems';
+
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - spacing.xl * 2 - spacing.md) / 2;
+const BENTO_SMALL_WIDTH = (SCREEN_WIDTH - spacing.xl * 2 - spacing.md) / 2;
+const INITIAL_MORE_PLACES = 8;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -149,6 +157,7 @@ export default function SearchActivityScreen() {
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [filteredTag, setFilteredTag] = useState('all');
+  const [showAllPlaces, setShowAllPlaces] = useState(false);
   const isFetchingRef = useRef(false);
 
   // ─── Image enrichment ───
@@ -279,29 +288,40 @@ export default function SearchActivityScreen() {
     Alert.alert('Added!', `${place.name} added to your itinerary.`, [{ text: 'OK' }]);
   }, [dayIndex, activeSlot, addActivity]);
 
-  // ─── Filter by tag ───
-  const allPlaces = luxuryData?.allPlaces || [];
-  const crownJewels = luxuryData?.crownJewels || [];
-  const experienceTags = luxuryData?.experienceTags || [];
+  // ─── Filtering by tag (matches destination page logic) ───
+  const filterByTag = useCallback((places: LuxuryPlace[]) => {
+    if (!filteredTag || filteredTag === 'all') return places;
+    return places.filter((p) => {
+      const tags = p.organizationData?.experienceTags || [];
+      const cat = (p.category || '').toLowerCase();
+      return tags.some((t) => t.toLowerCase() === filteredTag.toLowerCase()) || cat === filteredTag.toLowerCase();
+    });
+  }, [filteredTag]);
 
-  const filteredPlaces = filteredTag === 'all'
-    ? allPlaces
-    : allPlaces.filter((p) => {
-        const tags = p.organizationData?.experienceTags || [];
-        const cat = (p.category || '').toLowerCase();
-        return tags.some((t) => t.toLowerCase() === filteredTag.toLowerCase()) || cat === filteredTag.toLowerCase();
-      });
+  const filteredCrownJewels = useMemo(
+    () => (luxuryData ? filterByTag(luxuryData.crownJewels) : []),
+    [luxuryData, filterByTag]
+  );
 
-  const topPlaces = filteredTag === 'all'
-    ? crownJewels
-    : crownJewels.filter((p) => {
-        const tags = p.organizationData?.experienceTags || [];
-        const cat = (p.category || '').toLowerCase();
-        return tags.some((t) => t.toLowerCase() === filteredTag.toLowerCase()) || cat === filteredTag.toLowerCase();
-      });
+  const filteredAllPlaces = useMemo(
+    () => (luxuryData ? filterByTag(luxuryData.allPlaces) : []),
+    [luxuryData, filterByTag]
+  );
 
-  const crownNames = new Set(topPlaces.map((p) => p.name));
-  const morePlaces = filteredPlaces.filter((p) => !crownNames.has(p.name));
+  const morePlaces = useMemo(() => {
+    if (!luxuryData) return [];
+    const crownNames = new Set(filteredCrownJewels.map((p) => p.name));
+    return filteredAllPlaces.filter((p) => !crownNames.has(p.name));
+  }, [luxuryData, filteredCrownJewels, filteredAllPlaces]);
+
+  const visibleMorePlaces = showAllPlaces
+    ? morePlaces
+    : morePlaces.slice(0, INITIAL_MORE_PLACES);
+
+  const filteredHiddenGems = useMemo(
+    () => (luxuryData ? filterByTag(luxuryData.hiddenGems) : []),
+    [luxuryData, filterByTag]
+  );
 
   // Active search mode
   const isSearchMode = searchQuery.trim().length > 0;
@@ -327,13 +347,20 @@ export default function SearchActivityScreen() {
             <ShimmerBlock width={80} height={36} />
             <ShimmerBlock width={100} height={36} />
             <ShimmerBlock width={90} height={36} />
+            <ShimmerBlock width={70} height={36} />
           </View>
           <ShimmerBlock width={200} height={24} />
           <ShimmerBlock width="100%" height={220} />
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
-            <ShimmerBlock width={CARD_WIDTH} height={140} />
-            <ShimmerBlock width={CARD_WIDTH} height={140} />
+            <ShimmerBlock width={BENTO_SMALL_WIDTH} height={140} />
+            <ShimmerBlock width={BENTO_SMALL_WIDTH} height={140} />
           </View>
+          <View style={{ flexDirection: 'row', gap: spacing.md }}>
+            <ShimmerBlock width={BENTO_SMALL_WIDTH} height={140} />
+            <ShimmerBlock width={BENTO_SMALL_WIDTH} height={140} />
+          </View>
+          <ShimmerBlock width={180} height={24} />
+          <ShimmerBlock width="100%" height={200} />
         </ScrollView>
         <View style={styles.loadingOverlay}>
           <View style={styles.loadingBadge}>
@@ -364,7 +391,7 @@ export default function SearchActivityScreen() {
           </View>
         </View>
         <Text style={[styles.resultCount, { color: themeColors.textSecondary }]}>
-          {allPlaces.length} places
+          {luxuryData?.allPlaces.length || 0} places
         </Text>
       </View>
 
@@ -435,20 +462,20 @@ export default function SearchActivityScreen() {
                   {searchResults.length} places found · Tap to add
                 </Text>
               </View>
-              <View style={styles.placesGrid}>
+              <View style={styles.morePlacesGrid}>
                 {searchResults.map((place, idx) => {
                   const imageUrl = getPlaceImageUrl(place) || place.image || place.imageUrls?.[0] || '';
                   return (
                     <TouchableOpacity
                       key={place.name + idx}
-                      style={[styles.placeCard, shadow.sm, { backgroundColor: themeColors.card }]}
+                      style={[styles.morePlaceCard, shadow.sm, { backgroundColor: themeColors.card }]}
                       activeOpacity={0.7}
                       onPress={() => handleAddPlace(place)}
                     >
                       {imageUrl ? (
-                        <Image source={{ uri: imageUrl }} style={styles.placeImage} resizeMode="cover" />
+                        <Image source={{ uri: imageUrl }} style={styles.morePlaceImage} resizeMode="cover" />
                       ) : (
-                        <View style={[styles.placeImage, styles.placePlaceholder, { backgroundColor: isDarkMode ? '#1F2937' : '#F3F4F6' }]}>
+                        <View style={[styles.morePlaceImage, styles.morePlacePlaceholder, { backgroundColor: isDarkMode ? '#1F2937' : '#F3F4F6' }]}>
                           <Ionicons name="image-outline" size={24} color={themeColors.textTertiary} />
                         </View>
                       )}
@@ -461,10 +488,10 @@ export default function SearchActivityScreen() {
                       <View style={styles.addBadge}>
                         <Ionicons name="add" size={16} color="#ffffff" />
                       </View>
-                      <View style={styles.placeContent}>
-                        <Text style={[styles.placeName, { color: themeColors.text }]} numberOfLines={2}>{place.name}</Text>
+                      <View style={styles.morePlaceContent}>
+                        <Text style={[styles.morePlaceName, { color: themeColors.text }]} numberOfLines={2}>{place.name}</Text>
                         {place.category && (
-                          <Text style={[styles.placeCategory, { color: themeColors.textTertiary }]} numberOfLines={1}>
+                          <Text style={[styles.morePlaceDuration, { color: themeColors.textTertiary }]} numberOfLines={1}>
                             {place.category}
                           </Text>
                         )}
@@ -485,39 +512,29 @@ export default function SearchActivityScreen() {
           )
         ) : luxuryData ? (
           <>
-            {/* ─── Experience Tag Filters ─── */}
-            {experienceTags.length > 0 && (
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.tagFilters}
-              >
-                <TouchableOpacity
-                  style={[styles.tagPill, filteredTag === 'all' && styles.tagPillActive]}
-                  onPress={() => setFilteredTag('all')}
-                >
-                  <Text style={{ fontSize: 14 }}>🌍</Text>
-                  <Text style={[styles.tagPillText, filteredTag === 'all' && styles.tagPillTextActive]}>
-                    All ({allPlaces.length})
-                  </Text>
-                </TouchableOpacity>
-                {experienceTags.map((t) => (
-                  <TouchableOpacity
-                    key={t.tag}
-                    style={[styles.tagPill, filteredTag === t.tag && styles.tagPillActive]}
-                    onPress={() => setFilteredTag(t.tag)}
-                  >
-                    {t.emoji && <Text style={{ fontSize: 14 }}>{t.emoji}</Text>}
-                    <Text style={[styles.tagPillText, filteredTag === t.tag && styles.tagPillTextActive]}>
-                      {t.tag} ({t.count})
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            )}
+            {/* ============================== */}
+            {/* 0. HERO CAROUSEL               */}
+            {/* ============================== */}
+            <HeroCarousel
+              places={filteredCrownJewels}
+              hero={luxuryData.hero}
+              locationName={destinationName}
+              onPlacePress={handleAddPlace}
+            />
 
-            {/* ─── Top Places — Bento Grid ─── */}
-            {topPlaces.length > 0 && (
+            {/* ============================== */}
+            {/* 1. EXPERIENCE TAG FILTERS      */}
+            {/* ============================== */}
+            <ExperienceTagFilters
+              tags={luxuryData.experienceTags}
+              selectedTag={filteredTag}
+              onTagSelect={setFilteredTag}
+            />
+
+            {/* ============================== */}
+            {/* 2. TOP PLACES — BENTO GRID     */}
+            {/* ============================== */}
+            {filteredCrownJewels.length > 0 && (
               <View style={styles.section}>
                 <View style={styles.sectionHeader}>
                   <Text style={[styles.sectionTitle, { color: themeColors.text }]}>
@@ -532,27 +549,50 @@ export default function SearchActivityScreen() {
                 <TouchableOpacity
                   style={[styles.bentoLarge, shadow.md]}
                   activeOpacity={0.7}
-                  onPress={() => handleAddPlace(topPlaces[0])}
+                  onPress={() => handleAddPlace(filteredCrownJewels[0])}
                 >
-                  {getPlaceImageUrl(topPlaces[0]) ? (
-                    <Image source={{ uri: getPlaceImageUrl(topPlaces[0])! }} style={styles.bentoLargeImage} resizeMode="cover" />
+                  {getPlaceImageUrl(filteredCrownJewels[0]) ? (
+                    <Image
+                      source={{ uri: getPlaceImageUrl(filteredCrownJewels[0])! }}
+                      style={styles.bentoLargeImage}
+                      resizeMode="cover"
+                    />
                   ) : (
-                    <LinearGradient colors={[colors.primary[400], colors.primary[700]]} style={styles.bentoLargeImage} />
+                    <LinearGradient
+                      colors={[colors.primary[400], colors.primary[700]]}
+                      style={styles.bentoLargeImage}
+                    />
                   )}
-                  <LinearGradient colors={['transparent', 'rgba(0,0,0,0.8)']} style={styles.bentoOverlay}>
-                    <View>
-                      <View style={styles.rankBadge}><Text style={styles.rankBadgeText}>#1</Text></View>
-                      {topPlaces[0].category && (
+                  <LinearGradient
+                    colors={['transparent', 'rgba(0,0,0,0.8)']}
+                    style={styles.bentoOverlay}
+                  >
+                    <View style={styles.bentoContent}>
+                      <View style={styles.rankBadge}>
+                        <Text style={styles.rankBadgeText}>#1</Text>
+                      </View>
+                      {filteredCrownJewels[0].category && (
                         <View style={styles.categoryPill}>
-                          <Text style={styles.categoryPillText}>{topPlaces[0].category}</Text>
+                          <Text style={styles.categoryPillText}>
+                            {filteredCrownJewels[0].category}
+                          </Text>
                         </View>
                       )}
-                      <Text style={styles.bentoTitle} numberOfLines={2}>{topPlaces[0].name}</Text>
+                      <Text style={styles.bentoTitle} numberOfLines={2}>
+                        {filteredCrownJewels[0].name}
+                      </Text>
+                      {filteredCrownJewels[0].shortDescription && (
+                        <Text style={styles.bentoDesc} numberOfLines={2}>
+                          {filteredCrownJewels[0].shortDescription}
+                        </Text>
+                      )}
                       <View style={styles.bentoMeta}>
-                        {topPlaces[0].rating && (
+                        {filteredCrownJewels[0].rating && (
                           <View style={styles.metaItem}>
                             <Ionicons name="star" size={14} color="#FBBF24" />
-                            <Text style={styles.metaText}>{Number(topPlaces[0].rating).toFixed(1)}</Text>
+                            <Text style={styles.metaText}>
+                              {Number(filteredCrownJewels[0].rating).toFixed(1)}
+                            </Text>
                           </View>
                         )}
                         <View style={styles.addPillOverlay}>
@@ -565,9 +605,9 @@ export default function SearchActivityScreen() {
                 </TouchableOpacity>
 
                 {/* #2-5 2x2 Grid */}
-                {topPlaces.length > 1 && (
+                {filteredCrownJewels.length > 1 && (
                   <View style={styles.bentoGrid}>
-                    {topPlaces.slice(1, 5).map((place, idx) => {
+                    {filteredCrownJewels.slice(1, 5).map((place, idx) => {
                       const imageUrl = getPlaceImageUrl(place);
                       return (
                         <TouchableOpacity
@@ -577,22 +617,41 @@ export default function SearchActivityScreen() {
                           onPress={() => handleAddPlace(place)}
                         >
                           {imageUrl ? (
-                            <Image source={{ uri: imageUrl }} style={styles.bentoSmallImage} resizeMode="cover" />
+                            <Image
+                              source={{ uri: imageUrl }}
+                              style={styles.bentoSmallImage}
+                              resizeMode="cover"
+                            />
                           ) : (
-                            <LinearGradient colors={[colors.primary[300], colors.primary[600]]} style={styles.bentoSmallImage} />
+                            <LinearGradient
+                              colors={[colors.primary[300], colors.primary[600]]}
+                              style={styles.bentoSmallImage}
+                            />
                           )}
-                          <LinearGradient colors={['transparent', 'rgba(0,0,0,0.75)']} style={styles.bentoSmallOverlay}>
+                          <LinearGradient
+                            colors={['transparent', 'rgba(0,0,0,0.75)']}
+                            style={styles.bentoSmallOverlay}
+                          >
                             <View style={[styles.rankBadge, styles.rankBadgeSmall]}>
                               <Text style={styles.rankBadgeSmallText}>#{idx + 2}</Text>
                             </View>
                             {place.rating && (
                               <View style={styles.smallRatingBadge}>
                                 <Ionicons name="star" size={10} color="#FBBF24" />
-                                <Text style={styles.smallRatingText}>{Number(place.rating).toFixed(1)}</Text>
+                                <Text style={styles.smallRatingText}>
+                                  {Number(place.rating).toFixed(1)}
+                                </Text>
                               </View>
                             )}
-                            <View>
-                              <Text style={styles.bentoSmallTitle} numberOfLines={2}>{place.name}</Text>
+                            <View style={styles.bentoSmallContent}>
+                              <Text style={styles.bentoSmallTitle} numberOfLines={2}>
+                                {place.name}
+                              </Text>
+                              {place.category && (
+                                <Text style={styles.bentoSmallCategory} numberOfLines={1}>
+                                  {place.category}
+                                </Text>
+                              )}
                             </View>
                           </LinearGradient>
                         </TouchableOpacity>
@@ -603,7 +662,9 @@ export default function SearchActivityScreen() {
               </View>
             )}
 
-            {/* ─── More Places Grid ─── */}
+            {/* ============================== */}
+            {/* 3. MORE AMAZING PLACES         */}
+            {/* ============================== */}
             {morePlaces.length > 0 && (
               <View style={styles.section}>
                 <View style={styles.sectionHeader}>
@@ -614,50 +675,136 @@ export default function SearchActivityScreen() {
                     {morePlaces.length} more places to add
                   </Text>
                 </View>
-                <View style={styles.placesGrid}>
-                  {morePlaces.map((place, idx) => {
+
+                <View style={styles.morePlacesGrid}>
+                  {visibleMorePlaces.map((place, idx) => {
                     const imageUrl = getPlaceImageUrl(place);
                     return (
                       <TouchableOpacity
                         key={place.name + idx}
-                        style={[styles.placeCard, shadow.sm, { backgroundColor: themeColors.card }]}
+                        style={[styles.morePlaceCard, shadow.sm, { backgroundColor: themeColors.card }]}
                         activeOpacity={0.7}
                         onPress={() => handleAddPlace(place)}
                       >
                         {imageUrl ? (
-                          <Image source={{ uri: imageUrl }} style={styles.placeImage} resizeMode="cover" />
+                          <Image
+                            source={{ uri: imageUrl }}
+                            style={styles.morePlaceImage}
+                            resizeMode="cover"
+                          />
                         ) : (
-                          <View style={[styles.placeImage, styles.placePlaceholder, { backgroundColor: isDarkMode ? '#1F2937' : '#F3F4F6' }]}>
+                          <View
+                            style={[
+                              styles.morePlaceImage,
+                              styles.morePlacePlaceholder,
+                              { backgroundColor: isDarkMode ? '#1F2937' : '#F3F4F6' },
+                            ]}
+                          >
                             <Ionicons name="image-outline" size={24} color={themeColors.textTertiary} />
                           </View>
                         )}
                         {place.rating && (
                           <View style={styles.cardRatingBadge}>
                             <Ionicons name="star" size={10} color="#FBBF24" />
-                            <Text style={styles.cardRatingText}>{Number(place.rating).toFixed(1)}</Text>
+                            <Text style={styles.cardRatingText}>
+                              {Number(place.rating).toFixed(1)}
+                            </Text>
                           </View>
                         )}
                         {place.category && (
                           <View style={styles.cardCategoryBadge}>
-                            <Text style={styles.cardCategoryText}>{place.category}</Text>
+                            <Text style={styles.cardCategoryText}>
+                              {place.category}
+                            </Text>
                           </View>
                         )}
                         <View style={styles.addBadge}>
                           <Ionicons name="add" size={16} color="#ffffff" />
                         </View>
-                        <View style={styles.placeContent}>
-                          <Text style={[styles.placeName, { color: themeColors.text }]} numberOfLines={2}>{place.name}</Text>
+                        <View style={styles.morePlaceContent}>
+                          <Text
+                            style={[styles.morePlaceName, { color: themeColors.text }]}
+                            numberOfLines={2}
+                          >
+                            {place.name}
+                          </Text>
                           {place.shortDescription && (
-                            <Text style={[styles.placeDesc, { color: themeColors.textTertiary }]} numberOfLines={2}>{place.shortDescription}</Text>
+                            <Text
+                              style={[styles.morePlaceDesc, { color: themeColors.textTertiary }]}
+                              numberOfLines={2}
+                            >
+                              {place.shortDescription}
+                            </Text>
+                          )}
+                          {place.duration && (
+                            <Text
+                              style={[styles.morePlaceDuration, { color: themeColors.textSecondary }]}
+                            >
+                              {place.duration}
+                            </Text>
                           )}
                         </View>
                       </TouchableOpacity>
                     );
                   })}
                 </View>
+
+                {/* View All / Show Less */}
+                {morePlaces.length > INITIAL_MORE_PLACES && (
+                  <TouchableOpacity
+                    onPress={() => setShowAllPlaces(!showAllPlaces)}
+                    style={[
+                      styles.viewAllButton,
+                      {
+                        backgroundColor: isDarkMode ? '#1F2937' : '#FFF7ED',
+                        borderColor: colors.primary[300],
+                      },
+                    ]}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons
+                      name={showAllPlaces ? 'chevron-up' : 'grid-outline'}
+                      size={18}
+                      color={colors.primary[500]}
+                    />
+                    <Text style={styles.viewAllButtonText}>
+                      {showAllPlaces
+                        ? 'Show Less'
+                        : `View All ${morePlaces.length} Places`}
+                    </Text>
+                    {!showAllPlaces && (
+                      <Ionicons name="chevron-down" size={16} color={colors.primary[500]} />
+                    )}
+                  </TouchableOpacity>
+                )}
               </View>
             )}
 
+            {/* ============================== */}
+            {/* 4. HERITAGE CIRCUITS           */}
+            {/* ============================== */}
+            {(Object.keys(luxuryData.administrativeCircuits).length > 0 ||
+              Object.keys(luxuryData.dynamicCircuits).length > 0) && (
+              <HeritageCircuits
+                administrativeCircuits={luxuryData.administrativeCircuits}
+                dynamicCircuits={luxuryData.dynamicCircuits}
+                onPlacePress={handleAddPlace}
+                filteredTag={filteredTag}
+              />
+            )}
+
+            {/* ============================== */}
+            {/* 5. HIDDEN GEMS                 */}
+            {/* ============================== */}
+            {filteredHiddenGems.length > 0 && (
+              <HiddenGems
+                gems={filteredHiddenGems}
+                onPlacePress={handleAddPlace}
+                filteredTag={filteredTag}
+              />
+            )}
+
+            {/* Bottom Spacer */}
             <View style={{ height: spacing['3xl'] }} />
           </>
         ) : (
@@ -680,7 +827,7 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   scrollContent: { paddingBottom: 0 },
 
-  // Header (matches destination page exactly)
+  // Header (matches destination page)
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -786,33 +933,6 @@ const styles = StyleSheet.create({
   },
   searchLoadingText: { fontSize: fontSize.sm },
 
-  // Tag Filters
-  tagFilters: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    gap: spacing.sm,
-  },
-  tagPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: 999,
-    backgroundColor: colors.gray[100],
-  },
-  tagPillActive: {
-    backgroundColor: '#059669',
-  },
-  tagPillText: {
-    fontSize: fontSize.xs,
-    fontWeight: fontWeight.semibold,
-    color: colors.textSecondary,
-  },
-  tagPillTextActive: {
-    color: '#ffffff',
-  },
-
   // Section
   section: { paddingTop: spacing.xl },
   sectionHeader: {
@@ -843,6 +963,7 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.lg,
     paddingTop: spacing['5xl'],
   },
+  bentoContent: {},
   rankBadge: {
     position: 'absolute',
     top: -60,
@@ -875,6 +996,12 @@ const styles = StyleSheet.create({
     fontSize: fontSize['2xl'],
     fontWeight: fontWeight.bold,
     color: '#ffffff',
+  },
+  bentoDesc: {
+    fontSize: fontSize.sm,
+    color: 'rgba(255,255,255,0.85)',
+    marginTop: spacing.xs,
+    lineHeight: 20,
   },
   bentoMeta: {
     flexDirection: 'row',
@@ -912,7 +1039,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xl,
   },
   bentoSmall: {
-    width: CARD_WIDTH,
+    width: BENTO_SMALL_WIDTH,
     height: 140,
     borderRadius: borderRadius.lg,
     overflow: 'hidden',
@@ -956,6 +1083,7 @@ const styles = StyleSheet.create({
     fontWeight: fontWeight.semibold,
     color: '#ffffff',
   },
+  bentoSmallContent: {},
   bentoSmallTitle: {
     fontSize: fontSize.sm,
     fontWeight: fontWeight.bold,
@@ -965,21 +1093,27 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
+  bentoSmallCategory: {
+    fontSize: 10,
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 2,
+    textTransform: 'uppercase',
+  },
 
-  // Places Grid (More + Search Results)
-  placesGrid: {
+  // More Places Grid (matches destination page)
+  morePlacesGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: spacing.md,
     paddingHorizontal: spacing.xl,
   },
-  placeCard: {
+  morePlaceCard: {
     width: CARD_WIDTH,
     borderRadius: borderRadius.lg,
     overflow: 'hidden',
   },
-  placeImage: { width: '100%', height: 110 },
-  placePlaceholder: {
+  morePlaceImage: { width: '100%', height: 110 },
+  morePlacePlaceholder: {
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1027,14 +1161,32 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     ...shadow.sm,
   },
-  placeContent: { padding: spacing.sm + 2 },
-  placeName: {
+  morePlaceContent: { padding: spacing.sm + 2 },
+  morePlaceName: {
     fontSize: fontSize.sm,
     fontWeight: fontWeight.semibold,
     lineHeight: 18,
   },
-  placeDesc: { fontSize: fontSize.xs, marginTop: 3, lineHeight: 16 },
-  placeCategory: { fontSize: 10, marginTop: 2, textTransform: 'uppercase' },
+  morePlaceDesc: { fontSize: fontSize.xs, marginTop: 3, lineHeight: 16 },
+  morePlaceDuration: { fontSize: fontSize.xs, marginTop: 4 },
+
+  // View All Button
+  viewAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: spacing.xl,
+    marginTop: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: spacing.sm,
+  },
+  viewAllButtonText: {
+    fontSize: fontSize.md,
+    fontWeight: fontWeight.semibold,
+    color: colors.primary[500],
+  },
 
   // Empty
   emptyContainer: {
