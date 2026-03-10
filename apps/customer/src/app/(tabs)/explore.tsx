@@ -244,14 +244,7 @@ export default function ExploreScreen() {
         if (category && category !== 'all') filters.category = category;
         if (sort && sort !== 'recommended') filters.sort = sort;
 
-        let response: any;
-        try {
-          response = await activityMarketplaceAPI.searchActivities(filters);
-        } catch {
-          // Fallback: build URL manually
-          const urlParams = new URLSearchParams(filters);
-          response = await makeAPICall(`/activities/search?${urlParams.toString()}`);
-        }
+        const response: any = await activityMarketplaceAPI.searchActivities(filters);
 
         const data = response?.data || response?.activities || [];
         const pagination = response?.pagination || {};

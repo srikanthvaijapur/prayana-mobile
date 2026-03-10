@@ -8,7 +8,7 @@ import { AuthProvider, useAuth } from '@prayana/shared-hooks';
 import { setBaseURL } from '@prayana/shared-services';
 
 // Set API URL immediately at module load time (before any component renders)
-const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.31.185:5000/api';
+const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://172.20.10.3:5000/api';
 setBaseURL(API_URL);
 console.log('[VendorApp] API URL set to:', API_URL);
 

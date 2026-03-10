@@ -345,51 +345,55 @@ export default function HomeScreen() {
   const orbTranslate2 = orbAnim2.interpolate({ inputRange: [0, 1], outputRange: [0, -10] });
 
   // Fetch data — only activities (destinations are hardcoded, matching web PWA)
+  // Use ref to prevent concurrent duplicate requests
+  const fetchInFlightRef = useRef<AbortController | null>(null);
+
   const fetchPopularActivities = useCallback(async (silent = false) => {
+    // Abort any in-flight request to prevent duplicates
+    if (fetchInFlightRef.current) {
+      fetchInFlightRef.current.abort();
+    }
+    const controller = new AbortController();
+    fetchInFlightRef.current = controller;
+
     if (!silent) setLoadingActivities(true);
     try {
       const res = await makeAPICall('/activities/search?limit=8&sort=rating', {
-        timeout: 30000,
+        timeout: 15000,
         retries: 0,
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (res?.success && Array.isArray(res.data)) setPopularActivities(res.data);
       else if (Array.isArray(res)) setPopularActivities(res);
     } catch (err: any) {
+      if (err.name === 'AbortError') return;
       // Log only on first failure — avoid repeating the same warning on every focus
       if (!fetchAttemptedRef.current) {
         console.warn('[Home] Activities fetch failed:', err.message);
       }
     } finally {
       fetchAttemptedRef.current = true;
+      fetchInFlightRef.current = null;
       if (!silent) setLoadingActivities(false);
     }
   }, []);
 
-  // Initial fetch on mount
-  useEffect(() => { fetchPopularActivities(); }, [fetchPopularActivities]);
-
-  // On tab focus: only retry if we haven't tried yet (avoids repeated timeouts on every tab switch)
+  // Single fetch on mount (useFocusEffect fires on initial mount AND tab focus)
   useFocusEffect(
     useCallback(() => {
       if (!fetchAttemptedRef.current) {
-        fetchPopularActivities(true);
+        fetchPopularActivities();
       }
     }, [fetchPopularActivities])
   );
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
-    try {
-      const res = await makeAPICall('/activities/search?limit=8&sort=rating', {
-        timeout: 15000,
-        retries: 0,
-      });
-      if (res?.success && Array.isArray(res.data)) setPopularActivities(res.data);
-      else if (Array.isArray(res)) setPopularActivities(res);
-    } catch {} finally {
-      setRefreshing(false);
-    }
-  }, []);
+    fetchAttemptedRef.current = false;
+    await fetchPopularActivities(true);
+    setRefreshing(false);
+  }, [fetchPopularActivities]);
 
   const handleDestinationPress = useCallback((name: string) => {
     console.log('[Home] Destination pressed:', name);

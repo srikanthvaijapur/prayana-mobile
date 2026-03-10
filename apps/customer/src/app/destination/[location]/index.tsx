@@ -300,21 +300,9 @@ export default function LocationSearchResults() {
         const pName = String(place.name).trim();
         const loc = String(locationName || place.name).trim();
 
-        // Build preview payload — available immediately from hierarchical search result
-        const previewPayload = {
-          name: place.name,
-          image: place.imageUrl || place.image || place.thumbnail || '',
-          shortDescription: place.shortDescription || place.description || place.about || '',
-          rating: place.rating || place.averageRating || place.stars || null,
-          category: place.category || place.type || '',
-          duration: place.duration || place.idealDays || '',
-        };
-
-        const href = {
-          pathname: `/destination/${encodeURIComponent(loc)}/${encodeURIComponent(pName)}`,
-          params: { preview: JSON.stringify(previewPayload) },
-        };
-        console.log('[Nav] Pushing with preview:', pName);
+        // Use simple string URL — matches how other screens navigate to /destination/[location]
+        const href = `/destination/${encodeURIComponent(loc)}/${encodeURIComponent(pName)}`;
+        console.log('[Nav] Pushing:', href);
         router.push(href as any);
       } catch (err: any) {
         console.error('[Nav] Navigation error:', err?.message || err);

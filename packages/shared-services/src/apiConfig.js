@@ -150,8 +150,8 @@ export const API_CONFIG = {
   },
 
   TIMEOUTS: {
-    DEFAULT: 30000,             // 30s - generous for mobile networks (was 15s, caused AbortError loops)
-    SEARCH: 25000,              // 25s for search/autocomplete endpoints
+    DEFAULT: 15000,             // 15s - reasonable for mobile networks
+    SEARCH: 12000,              // 12s for search/autocomplete endpoints
     LONG_OPERATION: 75000,
     IMAGE_REQUESTS: 10000,
     ITINERARY_GENERATION: 60000, // 60s timeout for AI generation (must be >= 60s or aborts silently)

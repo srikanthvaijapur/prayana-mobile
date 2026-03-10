@@ -24,7 +24,7 @@ ExpoNotifications.setNotificationHandler({
 });
 
 // Set API URL immediately at module load time (before any component renders)
-const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.31.185:5000/api';
+const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://172.20.10.3:5000/api';
 setBaseURL(API_URL);
 // Set image server origin for resolving relative proxy URLs in React Native
 // Strip "/api" suffix to get the server origin (e.g. "http://192.168.31.185:5000")
