@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -14,7 +14,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
+import * as WebBrowser from 'expo-web-browser';
+import * as Google from 'expo-auth-session/providers/google';
+import { makeRedirectUri } from 'expo-auth-session';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@prayana/shared-hooks';
@@ -26,17 +28,12 @@ import {
 } from 'firebase/auth';
 import { auth } from '@prayana/shared-services/src/firebase';
 
+WebBrowser.maybeCompleteAuthSession();
+
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 const GOOGLE_WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID || '';
 const GOOGLE_IOS_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID || '';
-
-// Configure native Google Sign-In SDK
-GoogleSignin.configure({
-  iosClientId: GOOGLE_IOS_CLIENT_ID || undefined,
-  webClientId: GOOGLE_WEB_CLIENT_ID || undefined,
-  offlineAccess: true,
-});
 
 // Google SVG-style colored "G" button logo
 function GoogleG() {
@@ -65,16 +62,37 @@ export default function LoginScreen() {
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const handleGoogleLogin = async () => {
-    setError('');
-    setIsGoogleLoading(true);
-    try {
-      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
-      const response = await GoogleSignin.signIn();
-      const idToken = response.data?.idToken;
-      if (!idToken) throw new Error('No ID token received from Google.');
+  const [request, response, promptAsync] = Google.useAuthRequest({
+    clientId: GOOGLE_WEB_CLIENT_ID || undefined,
+    iosClientId: GOOGLE_IOS_CLIENT_ID || undefined,
+    redirectUri: makeRedirectUri({ scheme: 'prayana' }),
+    scopes: ['openid', 'profile', 'email'],
+  });
 
-      const credential = GoogleAuthProvider.credential(idToken);
+  useEffect(() => {
+    if (!response) return;
+    if (response.type === 'success') {
+      const idToken = response.params?.id_token;
+      const accessToken = response.authentication?.accessToken;
+      if (idToken) handleGoogleToken(idToken, null);
+      else if (accessToken) handleGoogleToken(null, accessToken);
+      else {
+        setIsGoogleLoading(false);
+        setError('No token received from Google. Please try again.');
+      }
+    } else if (response.type === 'error') {
+      setIsGoogleLoading(false);
+      setError(response.error?.message || 'Google sign-in failed.');
+    } else if (response.type === 'dismiss' || response.type === 'cancel') {
+      setIsGoogleLoading(false);
+    }
+  }, [response]);
+
+  const handleGoogleToken = async (idToken: string | null, accessToken: string | null) => {
+    try {
+      const credential = idToken
+        ? GoogleAuthProvider.credential(idToken)
+        : GoogleAuthProvider.credential(null, accessToken);
       const userCredential = await signInWithCredential(auth, credential);
       setUser(userCredential.user);
       setIsAuthenticated(true);
@@ -82,20 +100,27 @@ export default function LoginScreen() {
       await resetGuestUsage();
       router.replace('/(tabs)');
     } catch (err: any) {
-      if (err.code === statusCodes.SIGN_IN_CANCELLED) {
-        // User cancelled — do nothing
-      } else if (err.code === statusCodes.IN_PROGRESS) {
-        setError('Sign-in already in progress.');
-      } else if (err.code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
-        setError('Google Play Services not available.');
-      } else if (err.code === 'auth/account-exists-with-different-credential') {
-        setError('An account already exists with this email using a different sign-in method.');
-      } else {
-        setError(err.message || 'Google Sign-In failed. Please try again.');
-      }
+      let msg = 'Google Sign-In failed. Please try again.';
+      if (err.code === 'auth/account-exists-with-different-credential') msg = 'An account already exists with this email using a different sign-in method.';
+      else if (err.code === 'auth/invalid-credential') msg = 'Invalid credential. Please try again.';
+      setError(msg);
     } finally {
       setIsGoogleLoading(false);
     }
+  };
+
+  const handleGoogleLogin = async () => {
+    setError('');
+    if (!GOOGLE_WEB_CLIENT_ID && !GOOGLE_IOS_CLIENT_ID) {
+      Alert.alert('Not Configured', 'Google Sign-In is not set up yet. Use email or phone login.');
+      return;
+    }
+    if (!request) {
+      Alert.alert('Not Ready', 'Google Sign-In is loading. Please try again.');
+      return;
+    }
+    setIsGoogleLoading(true);
+    await promptAsync();
   };
 
   const handleEmailLogin = async () => {

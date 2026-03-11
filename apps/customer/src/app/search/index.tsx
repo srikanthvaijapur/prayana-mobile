@@ -311,11 +311,11 @@ export default function SearchScreen() {
     const name = s.shortName || s.text;
     saveRecent(name);
 
-    if (s.type === 'destination' || s.source === 'osm') {
-      // City/region → AI search results page (list of places)
+    if (s.source === 'osm') {
+      // OSM result = city/region/country → AI search results page (list of places)
       navigateFromSearch(`/destination/${encodeURIComponent(name)}`);
     } else {
-      // DB place → navigate directly to place detail page
+      // DB result = specific place/attraction → place detail page
       const locationPart = s.subtitle?.split(',')[0]?.trim() || name;
       const preview = JSON.stringify({
         name: name,

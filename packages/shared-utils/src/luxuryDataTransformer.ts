@@ -488,7 +488,8 @@ export function getUniqueTags(
  * is invalid.
  */
 export function transformToLuxuryLayout(
-  apiResponse: ApiResponse
+  apiResponse: ApiResponse,
+  overrideLocationName?: string
 ): LuxuryData | null {
   // Validate response
   if (!apiResponse || apiResponse.success === false) {
@@ -506,8 +507,9 @@ export function transformToLuxuryLayout(
     return null;
   }
 
-  // Location name - from response or infer from first place
+  // Location name - prefer override (search query), then API response, then infer
   const locationName =
+    overrideLocationName ||
     apiResponse.locationName ||
     allPlaces[0].locationData?.city ||
     allPlaces[0].city ||

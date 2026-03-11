@@ -102,7 +102,7 @@ export const HeroCarousel: React.FC<HeroCarouselProps> = ({
         {/* Content Overlay */}
         <View style={styles.contentOverlay} pointerEvents="none">
           <Text style={styles.collectionTitle} numberOfLines={2}>
-            {hero.collectionTitle}
+            {locationName}
           </Text>
           <Text style={styles.tagline} numberOfLines={2}>
             {hero.tagline}

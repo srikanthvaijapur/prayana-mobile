@@ -228,7 +228,7 @@ export default function LocationSearchResults() {
 
       try {
         const response = await hierarchicalSearch(locationName, {}, { timeout: 60000 });
-        const transformed = transformToLuxuryLayout(response);
+        const transformed = transformToLuxuryLayout(response, locationName);
 
         if (transformed) {
           setLuxuryData(transformed);
@@ -307,10 +307,24 @@ export default function LocationSearchResults() {
         const pName = String(place.name).trim();
         const loc = String(locationName || place.name).trim();
 
-        // Use simple string URL — matches how other screens navigate to /destination/[location]
-        const href = `/destination/${encodeURIComponent(loc)}/${encodeURIComponent(pName)}`;
-        console.log('[Nav] Pushing:', href);
-        router.push(href as any);
+        // Build preview JSON from hierarchical search data for instant rendering
+        const preview = JSON.stringify({
+          name: pName,
+          image: place.image || place.imageUrls?.[0] || '',
+          rating: place.rating || null,
+          category: place.category || '',
+          shortDescription: place.description || '',
+          duration: place.duration || '',
+        });
+
+        router.push({
+          pathname: '/destination/[location]/[place]',
+          params: {
+            location: loc,
+            place: pName,
+            preview,
+          },
+        } as any);
       } catch (err: any) {
         console.error('[Nav] Navigation error:', err?.message || err);
         isNavigatingRef.current = false;
